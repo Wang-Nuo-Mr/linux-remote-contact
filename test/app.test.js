@@ -11,7 +11,7 @@ import { complete } from '../src/model.js';
 import { runProcess } from '../src/tasks.js';
 
 const secrets = { ADMIN_TOKEN: 'a'.repeat(40), ONEBOT_SECRET: 'b'.repeat(40), ONEBOT_TOKEN: 'c'.repeat(40) };
-const env = { ...secrets, ALLOWED_USERS: '101,102', ALLOWED_GROUPS: '201' };
+const env = { ...secrets, ALLOWED_USERS: '101,102', ALLOWED_GROUPS: '201', PRIVATE_DEBOUNCE_MS: '0', GROUP_DEBOUNCE_MS: '0' };
 function event(text, id = 1, user = 101) {
   return { post_type: 'message', message_type: 'private', user_id: user, self_id: 999, message_id: id, time: Math.floor(Date.now() / 1000), message: [{ type: 'text', data: { text } }] };
 }

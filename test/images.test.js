@@ -50,7 +50,7 @@ test('real signed webhook attaches images with speaker mapping, excludes downloa
   const dir=await mkdtemp(join(tmpdir(),'contact-images-test-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   await writeFile(join(dir,'identity.json'),JSON.stringify({creator:{qq:'10001',name:'王诺'},groups:[{id:'20001',members:[{qq:'10001',name:'王诺'},{qq:'10002',name:'群友'}]}]}));
   const bot=createServer((_,res)=>res.end('{"status":"ok","retcode":0}'));await new Promise(r=>bot.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>bot.close(r)));
-  const settings=loadConfig({ADMIN_TOKEN:'a'.repeat(40),ONEBOT_SECRET:'b'.repeat(40),ONEBOT_TOKEN:'c'.repeat(40),MODEL_BACKEND:'codex',ALLOWED_USERS:'10001',ALLOWED_GROUPS:'20001',COMPANION_IDENTITY_FILE:join(dir,'identity.json'),DATA_DIR:join(dir,'data'),WORKSPACE_DIR:join(dir,'work'),ONEBOT_URL:`http://127.0.0.1:${bot.address().port}`,GROUP_DEBOUNCE_MS:'100'});
+  const settings=loadConfig({PRIVATE_DEBOUNCE_MS:'0',ADMIN_TOKEN:'a'.repeat(40),ONEBOT_SECRET:'b'.repeat(40),ONEBOT_TOKEN:'c'.repeat(40),MODEL_BACKEND:'codex',ALLOWED_USERS:'10001',ALLOWED_GROUPS:'20001',COMPANION_IDENTITY_FILE:join(dir,'identity.json'),DATA_DIR:join(dir,'data'),WORKSPACE_DIR:join(dir,'work'),ONEBOT_URL:`http://127.0.0.1:${bot.address().port}`,GROUP_DEBOUNCE_MS:'100'});
   let paths=[],calls=0;
   const app=await createApp(settings,{imageLoader:(c,m)=>prepareImages(c,m,{fetcher:async()=>new Response(png)}),model:async(_,history,context,options)=>{
     calls++;paths=options.images;assert.ok(paths.length>0);for(const path of paths)await stat(path);

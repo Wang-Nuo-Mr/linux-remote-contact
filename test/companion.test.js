@@ -55,7 +55,7 @@ test('QQ companion: one model call, durable memory, group privacy, confirmed nat
   const onebot = createServer(async (req,res) => { let raw=''; for await(const c of req) raw+=c; replies.push(JSON.parse(raw)); res.end('{"status":"ok","retcode":0}'); });
   await new Promise(r=>onebot.listen(0,'127.0.0.1',r));
   t.after(()=>new Promise(r=>onebot.close(r)));
-  const config = loadConfig({ ADMIN_TOKEN:'a'.repeat(40),ONEBOT_SECRET:'b'.repeat(40),ONEBOT_TOKEN:'c'.repeat(40),ALLOWED_USERS:'101,102',ALLOWED_GROUPS:'201',MODEL_BACKEND:'codex',ENABLE_CODEX_WORK:'true',REPLY_DELAY_MS:'0',ONEBOT_URL:`http://127.0.0.1:${onebot.address().port}`,DATA_DIR:join(dir,'data'),WORKSPACE_DIR:join(dir,'workspace') });
+  const config = loadConfig({PRIVATE_DEBOUNCE_MS:'0',GROUP_DEBOUNCE_MS:'0', ADMIN_TOKEN:'a'.repeat(40),ONEBOT_SECRET:'b'.repeat(40),ONEBOT_TOKEN:'c'.repeat(40),ALLOWED_USERS:'101,102',ALLOWED_GROUPS:'201',MODEL_BACKEND:'codex',ENABLE_CODEX_WORK:'true',REPLY_DELAY_MS:'0',ONEBOT_URL:`http://127.0.0.1:${onebot.address().port}`,DATA_DIR:join(dir,'data'),WORKSPACE_DIR:join(dir,'workspace') });
   const options = {
     model:async(_,history,context) => {
       contexts.push(context);

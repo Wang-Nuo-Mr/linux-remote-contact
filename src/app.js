@@ -79,7 +79,7 @@ export async function createApp(config, { model = companion, worker = work, logg
   music ||= new MusicService(config.music || { enabled: false }, budget);
   const lastVoice = new Map();
   const results = new Results(config.dataDir, config.workspace);
-  const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map(), groupBatches = new Map();
+  const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map(), messageBatches = new Map();
   let jobs = 0, persist = Promise.resolve(), auditing = Promise.resolve(), stopping = false;
   const logPath = join(config.dataDir, 'audit.jsonl');
   const sessionPath = key => join(config.dataDir, `${createHash('sha256').update(key).digest('hex')}.json`);
@@ -146,7 +146,7 @@ export async function createApp(config, { model = companion, worker = work, logg
   }
   const canWork = config.backend === 'codex' && config.codexWork;
   function capabilities(event, voiceMode = 'auto') {
-    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, imageInput: config.backend === 'codex', textOnlyInputs: config.backend !== 'codex' };
+    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, imageInput: config.backend === 'codex', textOnlyInputs: config.backend !== 'codex', crossChatSend: false, artifactDelivery: 'text-only' };
   }
   function formatRead(data) {
     if (data.items) return data.items.map((item, i) => `${i + 1}. ${item.nickname || item.qq || '动态'}${item.qq ? `（${item.qq}）` : ''}\n${item.text || '无可读取文字'}${item.imageCount ? `\n[含${item.imageCount}张图片，尚未识图]` : ''}${item.postId ? `\nTid：${item.postId}` : ''}`).join('\n\n') || '接口返回列表为空。';
@@ -333,6 +333,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       const settings = await memories.get(settingsKey);
       const voiceMode = { 自动: 'auto', 按需: 'requested', 关闭: 'off' }[settings.voiceMode] || 'auto';
       const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant, capabilities: capabilities(event, voiceMode) };
+      context.turn = { newMessages: batch.map(message => ({ senderQQ: message.user, text: message.text, time: message.time })) };
       context.imageAttachments = imageInput.attachments;
       if (imageInput.attachments.length) await audit({ kind: 'image-input', user: event.user, group: event.group, received: imageInput.attachments.length, attached: imageInput.paths.length });
       if (event.listening) {
@@ -389,22 +390,40 @@ export async function createApp(config, { model = companion, worker = work, logg
   }
   function enqueue(event) {
     const queueKey = event.conversationKey;
-    const batchable = event.listening && !event.memberNotice && !event.text.startsWith('/');
-    if (batchable && groupBatches.has(queueKey)) { groupBatches.get(queueKey).push(event); jobs++; return; }
-    // Commands/notices seal the previous batch, preserving their arrival order.
-    if (!batchable) groupBatches.delete(queueKey);
-    const batch = [event];
-    if (batchable) groupBatches.set(queueKey, batch);
+    const batchable = !event.memberNotice && !event.text.startsWith('/');
+    const quiet = event.type === 'private' ? config.privateDebounce ?? 3000 : config.groupDebounce ?? 4000;
+    const maxWait = config.maxBatchWait ?? 12000;
+    const open = messageBatches.get(queueKey);
+    if (batchable && open) {
+      open.messages.push(event); open.lastAt = Date.now(); jobs++; open.wake?.(); return;
+    }
+    // Commands/notices end the waiting window immediately, retaining queue order.
+    if (open) { open.sealed = true; open.wake?.(); messageBatches.delete(queueKey); }
+    const entry = { messages: [event], firstAt: Date.now(), lastAt: Date.now(), sealed: !batchable };
+    const batch = entry.messages;
+    if (batchable) messageBatches.set(queueKey, entry);
     const previous = chains.get(queueKey) || Promise.resolve();
     jobs++;
     const job = previous.then(async () => {
       if (batchable) {
-        await delay(config.groupDebounce ?? 1200);
-        if (groupBatches.get(queueKey) === batch) groupBatches.delete(queueKey);
+        while (!entry.sealed) {
+          const remaining = Math.min(entry.lastAt + quiet, entry.firstAt + maxWait) - Date.now();
+          if (remaining <= 0) break;
+          await new Promise(resolve => {
+            const done = () => { clearTimeout(timer); entry.wake = null; resolve(); };
+            const timer = setTimeout(done, remaining);
+            entry.wake = done;
+          });
+        }
+        entry.sealed = true;
+        if (messageBatches.get(queueKey) === entry) messageBatches.delete(queueKey);
       }
       const current = batch.at(-1);
       if (batchable) current.batch = batch;
-      try { const answer = await handle(current); if (answer !== null) await reply(current, answer); }
+      try {
+        if (batchable) await audit({ kind: 'chat-batch', type: current.type, group: current.group, user: current.user, messages: batch.length, waitedMs: Date.now() - entry.firstAt });
+        const answer = await handle(current); if (answer !== null) await reply(current, answer);
+      }
       catch { logger.error('message_failed'); if (!current.listening || batch.some(message => message.mentioned || message.imageRefs?.length) || current.text.startsWith('/')) await reply(current, '处理失败，请管理员检查模型、OneBot与服务日志；本条不会自动重试。').catch(() => logger.error('reply_failed')); }
     }).finally(() => { jobs -= batch.length; if (chains.get(queueKey) === job) chains.delete(queueKey); });
     chains.set(queueKey, job);
@@ -425,7 +444,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       }
       if (req.method === 'GET' && path === '/api/status') {
         if (!equal(req.headers.authorization, `Bearer ${config.adminToken}`)) throw httpError(401);
-        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), imageEnabled: config.backend === 'codex', uptimeSeconds: Math.floor(process.uptime()) });
+        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), imageEnabled: config.backend === 'codex', receiveDelay: { privateMs: config.privateDebounce ?? 3000, groupMs: config.groupDebounce ?? 4000, maxWaitMs: config.maxBatchWait ?? 12000 }, uptimeSeconds: Math.floor(process.uptime()) });
       }
       if (req.method !== 'POST' || path !== '/api/onebot/event') throw httpError(404);
       if (stopping || jobs >= 32) throw httpError(503);
@@ -458,6 +477,7 @@ export async function createApp(config, { model = companion, worker = work, logg
     async idle() { await Promise.all(chains.values()); await persist; await auditing; },
     async close() {
       stopping = true;
+      for (const entry of messageBatches.values()) { entry.sealed = true; entry.wake?.(); }
       await new Promise(resolve => server.close(resolve));
       await this.idle();
     },

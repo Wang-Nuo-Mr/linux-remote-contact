@@ -10,7 +10,7 @@ import { createApp, parseEvent } from '../src/app.js';
 import { MemoryStore } from '../src/memory.js';
 import { fixedIdentityPrompt } from '../src/groups.js';
 
-const env = { ADMIN_TOKEN: 'a'.repeat(40), ONEBOT_SECRET: 'b'.repeat(40), ONEBOT_TOKEN: 'c'.repeat(40), MODEL_BACKEND: 'codex', ALLOWED_USERS: '10001', ALLOWED_GROUPS: '20001', ENABLE_CODEX_WORK: 'true', REPLY_DELAY_MS: '0', GROUP_DEBOUNCE_MS: '0' };
+const env = { ADMIN_TOKEN: 'a'.repeat(40), ONEBOT_SECRET: 'b'.repeat(40), ONEBOT_TOKEN: 'c'.repeat(40), MODEL_BACKEND: 'codex', ALLOWED_USERS: '10001', ALLOWED_GROUPS: '20001', ENABLE_CODEX_WORK: 'true', REPLY_DELAY_MS: '0', GROUP_DEBOUNCE_MS: '0', PRIVATE_DEBOUNCE_MS: '0' };
 const identity = { creator: { qq: '10001', name: '王诺' }, groups: [{ id: '20001', members: [{qq:'10001',name:'王诺'},{qq:'10002',name:'甲'},{qq:'10003',name:'乙'}] }] };
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'group-contact-'));

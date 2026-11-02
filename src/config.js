@@ -27,6 +27,10 @@ export function loadConfig(env = process.env) {
   if (new Set([adminToken, onebotSecret, onebotToken]).size !== 3) throw new Error('Use three different secrets');
   const allowedUsers = ids('ALLOWED_USERS'), allowedGroups = ids('ALLOWED_GROUPS');
   const identity = loadIdentity(env.COMPANION_IDENTITY_FILE, { allowedUsers, allowedGroups, backend });
+  const privateDebounce = number('PRIVATE_DEBOUNCE_MS', 3000, 0, 10000);
+  const groupDebounce = number('GROUP_DEBOUNCE_MS', 4000, 0, 10000);
+  const maxBatchWait = number('CHAT_MAX_WAIT_MS', 12000, 100, 60000);
+  if (maxBatchWait < Math.max(privateDebounce, groupDebounce)) throw new Error('CHAT_MAX_WAIT_MS must cover both debounce windows');
   return {
     host: env.HOST || '127.0.0.1', port: number('PORT', 3789, 0, 65535),
     adminToken, onebotSecret, onebotToken,
@@ -43,7 +47,7 @@ export function loadConfig(env = process.env) {
     workTimeout: number('CODEX_WORK_TIMEOUT_MS', 300000, 1000, 900000),
     autoMemory: env.AUTO_MEMORY !== 'false',
     replyDelay: number('REPLY_DELAY_MS', 500, 0, 5000),
-    groupDebounce: number('GROUP_DEBOUNCE_MS', 1200, 0, 5000),
+    privateDebounce, groupDebounce, maxBatchWait,
     voice: loadMediaConfig(env.TTS_CONFIG_FILE, 'voice'),
     music: loadMediaConfig(env.MUSIC_CONFIG_FILE, 'music'),
     socialEnabled: env.ENABLE_QQ_SOCIAL === 'true',
