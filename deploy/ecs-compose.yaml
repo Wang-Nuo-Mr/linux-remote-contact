@@ -1,0 +1,34 @@
+# Run from project root with --env-file .env; only selected values enter NapCat.
+name: contact-ecs
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:v4.18.42
+    restart: unless-stopped
+    environment:
+      WEBUI_TOKEN: ${WEBUI_TOKEN:?Set WEBUI_TOKEN in ../.env}
+      NAPCAT_UID: ${NAPCAT_UID:?Set NAPCAT_UID in ../.env}
+      NAPCAT_GID: ${NAPCAT_GID:?Set NAPCAT_GID in ../.env}
+      NAPCAT_DISABLE_MULTI_PROCESS: "1"
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - napcat-config:/app/napcat/config
+      - napcat-qq:/app/.config/QQ
+    networks:
+      - napcat
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+networks:
+  napcat:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.70.0/24
+          gateway: 172.30.70.1
+volumes:
+  napcat-config:
+  napcat-qq:

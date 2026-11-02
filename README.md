@@ -2,6 +2,8 @@
 
 运行在 Linux / 阿里云 ECS 上的个人 QQ AI 联系中枢。通过 OneBot 11 接收 QQ 消息，直接与 Codex 聊天，积累可管理的长期记忆，并在确认后执行任务。当前版本 0.2。
 
+Ubuntu ECS 使用原生 Codex 时，推荐按 [ECS 部署与维护说明](deploy/ECS-HANDOFF.md) 部署：NapCat 单独使用 Docker，hub 交给 systemd，固定专用网桥地址并持久保存 QQ 登录数据。
+
 ## 你的使用路线：QQ + 现有 Codex 登录
 
 这是适合“在QQ里有一个固定窗口，能聊天、记得我、帮我办事”的配置。运行 hub 的 Linux 用户需要单独完成 Codex 登录；电脑端登录不会自动出现在服务器上。无需为这条路线另配 GPT API Key。实际用量、额度和可用模型由你的 Codex 登录账户决定，不是无限免费。

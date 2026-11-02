@@ -1,0 +1,37 @@
+[Unit]
+Description=Contact native Codex hub (ECS)
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=contact
+Group=contact
+WorkingDirectory=/var/lib/linux-contact/app
+EnvironmentFile=/var/lib/linux-contact/app/.env
+Environment=HOME=/var/lib/linux-contact
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node /var/lib/linux-contact/app/src/main.js
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+# main.js allows up to 300 seconds to drain pending work.
+TimeoutStopSec=320
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/var/lib/linux-contact/app/data /var/lib/linux-contact/app/workspace /var/lib/linux-contact/.codex
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Keep user namespaces / mount syscalls available for Codex's own sandbox.
+# CODEX_HOME must remain writable for authentication refresh and CLI state.
+
+[Install]
+WantedBy=multi-user.target
