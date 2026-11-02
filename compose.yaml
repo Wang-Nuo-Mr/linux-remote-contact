@@ -1,0 +1,51 @@
+services:
+  hub:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: ${HUB_ENV_FILE:-.env}
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+      WORKSPACE_DIR: /app/workspace
+      TASKS_FILE: /app/config/tasks.json
+      ONEBOT_URL: http://napcat:3000
+    ports:
+      - "127.0.0.1:3789:3789"
+    volumes:
+      - hub-data:/app/data
+      - workspace:/app/workspace
+      - ./config/tasks.json:/app/config/tasks.json:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 128
+    cpus: 1.0
+    stop_grace_period: 5m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+  napcat:
+    profiles: [qq]
+    image: mlikiowa/napcat-docker:${NAPCAT_TAG:-v4.18.41}
+    restart: unless-stopped
+    environment:
+      NAPCAT_UID: ${NAPCAT_UID:-1000}
+      NAPCAT_GID: ${NAPCAT_GID:-1000}
+      WEBUI_TOKEN: ${WEBUI_TOKEN}
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - napcat-config:/app/napcat/config
+      - napcat-qq:/app/.config/QQ
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+volumes:
+  hub-data:
+  workspace:
+  napcat-config:
+  napcat-qq:

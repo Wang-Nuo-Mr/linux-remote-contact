@@ -1,0 +1,14 @@
+{
+  "system": {
+    "description": "查看容器或当前Linux环境的内核信息",
+    "command": "uname",
+    "args": ["-a"],
+    "timeoutMs": 5000
+  },
+  "disk": {
+    "description": "查看当前工作目录的磁盘空间",
+    "command": "df",
+    "args": ["-h", "."],
+    "timeoutMs": 5000
+  }
+}

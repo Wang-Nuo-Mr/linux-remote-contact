@@ -1,0 +1,14 @@
+{
+  "name": "linux-remote-contact",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Linux QQ/OneBot AI contact hub with confirmed, allowlisted tasks",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "init-env": "node scripts/init-env.js",
+    "start": "node --env-file=.env src/main.js",
+    "test": "node --test",
+    "check": "node --check src/main.js && node --check src/app.js && node --check src/config.js && node --check src/model.js && node --check src/tasks.js"
+  }
+}

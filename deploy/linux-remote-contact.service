@@ -1,0 +1,25 @@
+[Unit]
+Description=Linux Remote Contact
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=contact
+Group=contact
+WorkingDirectory=/opt/linux-remote-contact
+EnvironmentFile=/opt/linux-remote-contact/.env
+ExecStart=/usr/bin/node /opt/linux-remote-contact/src/main.js
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/linux-remote-contact/data /opt/linux-remote-contact/workspace
+
+[Install]
+WantedBy=multi-user.target
