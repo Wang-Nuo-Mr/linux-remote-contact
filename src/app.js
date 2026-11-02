@@ -8,6 +8,8 @@ import { MemoryStore, memoryContext, safeMemory } from './memory.js';
 import { splitReply } from './delivery.js';
 import { Results } from './results.js';
 import { GroupDirectory, displayName } from './groups.js';
+import { SpeechService, MusicService, UsageBudget } from './media.js';
+import { onebot, isSocialOwner, validateAction, isReadAction, actionSummary, readSocial, writeSocial } from './social.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 function equal(a, b) {
@@ -63,12 +65,16 @@ export function parseEvent(event, config) {
     speaker, time: event.time };
 }
 
-export async function createApp(config, { model = companion, worker = work, logger = console } = {}) {
+export async function createApp(config, { model = companion, worker = work, logger = console, speech, music, socialRead = readSocial, socialWrite = writeSocial } = {}) {
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   await mkdir(config.workspace, { recursive: true, mode: 0o700 });
   const tasks = config.enableTasks ? await loadTasks(config.tasksFile) : {};
   const memories = new MemoryStore(config.dataDir, config.autoMemory);
   const directory = new GroupDirectory(config.dataDir, config.listeningGroups);
+  const budget = new UsageBudget(config.dataDir);
+  speech ||= new SpeechService(config.voice || { enabled: false }, budget);
+  music ||= new MusicService(config.music || { enabled: false }, budget);
+  const lastVoice = new Map();
   const results = new Results(config.dataDir, config.workspace);
   const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map(), groupBatches = new Map();
   let jobs = 0, persist = Promise.resolve(), auditing = Promise.resolve(), stopping = false;
@@ -102,7 +108,8 @@ export async function createApp(config, { model = companion, worker = work, logg
     return operation;
   }
   async function reply(event, text) {
-    const chunks = splitReply(text);
+    const envelope = typeof text === 'string' ? { text } : text;
+    const chunks = splitReply(envelope.text);
     for (let index = 0; index < chunks.length; index++) {
       if (index > 0) await delay(config.replyDelay ?? 500);
       const response = await fetch(`${config.onebotUrl}/send_msg`, {
@@ -114,14 +121,40 @@ export async function createApp(config, { model = companion, worker = work, logg
       const data = await response.json();
       if (data.status !== 'ok' || data.retcode !== 0) throw new Error('OneBot rejected reply');
     }
+    if (envelope.speech && config.voice?.enabled) {
+      const recent = lastVoice.get(event.conversationKey) || 0;
+      if (!envelope.speech.explicit && Date.now() - recent < 30000) return;
+      try {
+        const audio = await speech.synthesize(envelope.speech.text, envelope.speech.style);
+        await onebot(config, 'send_msg', { message_type: event.type, ...(event.type === 'group' ? { group_id: Number(event.group) } : { user_id: Number(event.user) }), message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }] });
+        lastVoice.set(event.conversationKey, Date.now());
+        await audit({ kind: 'voice-sent', group: event.group, user: event.user, characters: Array.from(envelope.speech.text).length });
+      } catch {
+        logger.error('voice_failed');
+        await reply(event, '文字已发送，语音合成或QQ语音发送未成功，请检查音色、接口权限和今日语音额度；不会自动重试。');
+      }
+    }
   }
   function propose(key, item) {
     for (const [token, entry] of pending) if (entry.key === key) pending.delete(token);
     const token = randomBytes(12).toString('hex');
-    pending.set(token, { ...item, key, expires: Date.now() + 60000 });
-    return `准备执行：${item.summary}${item.kind === 'codex' ? `\n实际任务内容：${item.prompt}\n范围：新的独立任务目录；不修改服务器系统配置。` : ''}\n60秒内发送 /确认 ${token}，或 /取消。`;
+    pending.set(token, { ...item, key, expires: Date.now() + (item.kind === 'social' ? 300000 : 60000) });
+    return `准备执行：${item.summary}${item.kind === 'codex' ? `\n实际任务内容：${item.prompt}\n范围：新的独立任务目录；不修改服务器系统配置。` : ''}\n${item.kind === 'social' ? '5分钟' : '60秒'}内发送 /确认 ${token}，或 /取消。`;
   }
   const canWork = config.backend === 'codex' && config.codexWork;
+  function capabilities(event, voiceMode = 'auto') {
+    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, textOnlyInputs: true };
+  }
+  function formatRead(data) {
+    if (data.items) return data.items.map((item, i) => `${i + 1}. ${item.nickname || item.qq || '动态'}${item.qq ? `（${item.qq}）` : ''}\n${item.text || '无可读取文字'}${item.imageCount ? `\n[含${item.imageCount}张图片，尚未识图]` : ''}${item.postId ? `\nTid：${item.postId}` : ''}`).join('\n\n') || '接口返回列表为空。';
+    return `空间名称：${data.name || '未设置'}\n空间说明：${data.description || '未设置'}`;
+  }
+  function proposeSocial(event, input) {
+    if (!isSocialOwner(config, event)) return 'QQ空间和资料操作请由创造者在私聊中发起。';
+    const action = validateAction(input);
+    if (action.type === 'song' ? !config.music?.enabled : !config.socialEnabled) return action.type === 'song' ? '音乐服务尚未配置。百炼语音密钥用于说话；唱歌需要单独的音乐服务凭据。' : 'QQ空间和资料接口尚未启用。';
+    return propose(event.key, { kind: 'social', action, summary: actionSummary(action) });
+  }
   async function handle(event) {
     const { key, text } = event;
     const batch = event.batch || [event];
@@ -130,10 +163,38 @@ export async function createApp(config, { model = companion, worker = work, logg
     const chatKey = event.conversationKey, limit = event.listening ? 60 : 12;
     const controller = !event.listening || event.user === config.creator?.qq;
     const settingsKey = event.listening ? `group:${event.group}:assistant` : key;
-    if (!controller && /^\/(?:干活|运行|确认|设定|重置)(?:\s|$)/.test(text)) return `这项管理或执行操作仅由创造者${config.creator.name}的账号授权。`;
+    if (!controller && /^\/(?:干活|运行|确认|设定|重置|语音模式)(?:\s|$)/.test(text)) return `这项管理或执行操作仅由创造者${config.creator.name}的账号授权。`;
     const now = Date.now();
     for (const [token, item] of pending) if (item.expires <= now) pending.delete(token);
-    if (text === '/帮助' || text === '/help') return `/状态 /重置 /记忆 /认识 /新成员 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n${event.listening ? '本群无需@，由Codex判断是否开口。个人记忆按QQ号区分，任务与群管理仅创造者可操作。' : '普通文字直接聊天，普通群聊需要@机器人。记忆按会话隔离。'}`;
+    if (text === '/能力' || text === '/自身说明') return `我由${config.creator?.name || '管理员'}部署在Ubuntu服务器上，使用${config.backend}生成回复。\n语音：${config.voice?.enabled ? '已配置，文字和语音对应，可按语境调整语气' : '未配置'}\n音乐生成：${config.music?.enabled ? '已配置独立音乐服务' : '未配置，不能用语音API直接冒充唱歌'}\nQQ空间与资料：${config.socialEnabled ? '已启用；创造者私聊可读取，写入需确认' : '未启用'}\n${config.listeningGroups.size ? '指定群无需@，由我判断是否回答；' : ''}每个人的记忆独立，固定创造者身份保留。\n我不自动知道桌面端完整部署过程，也没有图片/语音输入理解能力。`;
+    if (text === '/声线') return config.voice?.enabled ? `已配置固定音色，模型：${config.voice.model}。\n/语音 内容：直接朗读\n/语音模式 自动、按需、关闭：切换当前会话的语音方式。` : '百炼声线尚未配置完成。';
+    if (text.startsWith('/语音模式 ')) {
+      const mode = text.slice(6).trim();
+      if (!['自动', '按需', '关闭'].includes(mode)) return '用法：/语音模式 自动 或 按需 或 关闭';
+      const settings = await memories.get(settingsKey); settings.voiceMode = mode; await memories.put(settingsKey, settings);
+      return `本会话语音模式：${mode}。文字回复继续保留。`;
+    }
+    if (text.startsWith('/语音 ')) {
+      if (!config.voice?.enabled) return '百炼声线尚未配置完成。';
+      const value = text.slice(4).trim();
+      if (!value || Array.from(value).length > (config.voice.maxCharacters || 600)) return `语音文本须为1～${config.voice.maxCharacters || 600}字。`;
+      return { text: value, speech: { text: value, style: '温柔自然地轻声说话', explicit: true } };
+    }
+    const readCommand = text.match(/^\/(空间动态|空间说说|空间资料|空间详情)(?:\s+([^\s]+))?(?:\s+([^\s]+))?$/);
+    if (readCommand) {
+      if (!config.socialEnabled || !isSocialOwner(config, event)) return '空间读取请由创造者在私聊中使用，且需启用QQ空间接口。';
+      const [, command, first = '', second = ''] = readCommand;
+      const action = validateAction({ type: { 空间动态: 'qzone_feed', 空间说说: 'qzone_posts', 空间资料: 'qzone_profile', 空间详情: 'qzone_detail' }[command], target: command === '空间详情' ? second : first, postId: command === '空间详情' ? first : '' });
+      try { const data = await socialRead(config, action); await audit({ kind: 'social-read', user: event.user, action: action.type }); return formatRead(data); }
+      catch { logger.error('social_read_failed'); return 'QQ空间接口读取失败或账号尚未开通空间；没有取得可用内容。'; }
+    }
+    const writeCommand = text.match(/^\/(发动态|昵称|签名|头像)\s+([\s\S]+)$/);
+    if (writeCommand) return proposeSocial(event, { type: { 发动态: 'qzone_post', 昵称: 'nickname', 签名: 'signature', 头像: 'avatar' }[writeCommand[1]], content: writeCommand[2].trim() });
+    if (text.startsWith('/唱歌 ')) {
+      const [style, ...lyrics] = text.slice(4).split('|');
+      return proposeSocial(event, { type: 'song', style: lyrics.length ? style.trim() : '温柔清新的短歌', content: lyrics.length ? lyrics.join('|').trim() : style.trim() });
+    }
+    if (text === '/帮助' || text === '/help') return `/状态 /能力 /重置 /记忆 /认识 /新成员 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/声线 /语音 内容 /语音模式 自动或按需或关闭\n创造者私聊：/空间动态 /空间说说 [QQ号] /空间资料 [QQ号] /空间详情 Tid [QQ号]\n/发动态 完整正文 /昵称 内容 /签名 内容 /头像 HTTPS图片地址 /唱歌 曲风|原创歌词\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n${event.listening ? '本群无需@，由Codex判断是否开口。个人记忆按QQ号区分，任务与群管理仅创造者可操作。' : '普通文字直接聊天，普通群聊需要@机器人。记忆按会话隔离。'}`;
     if (text === '/状态') return `Linux Remote Contact 在线\n模型后端：${config.backend}\n排队/运行：${jobs}\n群聊模式：${event.listening ? '全消息理解，自主决定回复' : '私聊或@触发'}\nCodex工作模式：${canWork && controller ? '已启用' : '关闭或无执行权限'}\n预设任务：${config.enableTasks ? '已启用' : '关闭'}`;
     if (text === '/重置') { await save(chatKey, []); return '近期对话已清空，长期记忆、角色设定与固定创造者身份保留。'; }
     if (text === '/新成员' && event.listening) {
@@ -218,6 +279,24 @@ export async function createApp(config, { model = companion, worker = work, logg
       const token = text.slice(4).trim(), item = pending.get(token);
       if (!item || item.key !== key || item.expires <= now) return '确认码无效、过期或不属于本会话。';
       pending.delete(token); // Consume BEFORE any execution, including failure.
+      if (item.kind === 'social') {
+        if (!isSocialOwner(config, event)) return '仅创造者私聊可以确认QQ空间、资料或歌曲操作。';
+        try {
+          await audit({ kind: 'social-write-start', user: event.user, action: item.action.type });
+          if (item.action.type === 'song') {
+            if (!config.music?.enabled) return '音乐服务已关闭。';
+            await reply(event, '开始生成歌曲，完成后发送音频；生成的歌声不保证与日常声线一致。');
+            const audio = await music.generate(item.action.style || '温柔清新的短歌', item.action.content);
+            await onebot(config, 'send_private_msg', { user_id: Number(event.user), message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }] });
+            await audit({ kind: 'song-sent', user: event.user }); return '歌曲音频已交给QQ发送。';
+          }
+          if (!config.socialEnabled) return 'QQ空间与资料功能已关闭。';
+          if (item.action.type === 'qzone_post') await budget.reserve('qzonePosts', 1, 3);
+          const result = await socialWrite(config, item.action);
+          await audit({ kind: 'social-write-end', user: event.user, action: item.action.type, status: 'accepted' });
+          return result.text;
+        } catch { logger.error('social_write_failed'); await audit({ kind: 'social-write-end', user: event.user, action: item.action.type, status: 'failed-or-unknown' }); return '本次接口操作未确认成功，可能涉及账号权限、服务额度或网络问题；不会自动重试，以免重复发表或修改。'; }
+      }
       if (item.kind === 'codex') {
         if (!canWork) return 'Codex工作模式已关闭。';
         const result = await results.create(key, item.summary);
@@ -246,7 +325,9 @@ export async function createApp(config, { model = companion, worker = work, logg
     const incoming = batch.map(message => ({ role: 'user', content: event.listening ? JSON.stringify({ speaker: message.speaker, text: message.text, time: message.time, mentionedAssistant: message.mentioned, segmentTypes: message.segmentTypes }) : message.text }));
     const input = [...previous, ...incoming].slice(-limit - 1);
     const state = await memories.get(key);
-    const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant };
+    const settings = await memories.get(settingsKey);
+    const voiceMode = { 自动: 'auto', 按需: 'requested', 关闭: 'off' }[settings.voiceMode] || 'auto';
+    const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant, capabilities: capabilities(event, voiceMode) };
     if (event.listening) {
       context.persona = (await memories.get(settingsKey)).persona;
       context.group = { id: event.group, mode: 'listen', speaker: event.speaker, newMessages: batch.map(message => ({ speaker: message.speaker, text: message.text })), participants: [] };
@@ -258,8 +339,17 @@ export async function createApp(config, { model = companion, worker = work, logg
     // Retain every accepted group message, even when the model stays silent/fails.
     if (event.listening) await save(chatKey, input.slice(-limit));
     const response = await model(config, input, context);
-    const output = typeof response === 'string' ? { reply: response, memories: [], task: null } : response;
+    let output = typeof response === 'string' ? { reply: response, memories: [], task: null } : response;
     if (!output || typeof output.reply !== 'string' || (event.listening && typeof output.shouldReply !== 'boolean') || (!(event.listening && output.shouldReply === false) && !output.reply.trim())) throw new Error('Invalid reply');
+    if (output.action && isReadAction(validateAction(output.action)) && context.capabilities.social) {
+      try {
+        const action = validateAction(output.action), data = await socialRead(config, action);
+        await audit({ kind: 'social-read', user: event.user, action: action.type });
+        const followup = await model(config, input, { ...context, automatic: false, workEnabled: false, capabilities: { ...context.capabilities, social: false, music: false }, toolResult: { type: action.type, data } });
+        output = { ...followup, action: null, task: null, memories: [] };
+        if (typeof output.reply !== 'string' || !output.reply.trim()) throw new Error('Empty read summary');
+      } catch { logger.error('social_read_failed'); output = { shouldReply: true, reply: 'QQ空间读取未成功，没有取得可用内容。', memories: [], task: null, action: null }; }
+    }
     const entries = Array.isArray(output.memories) ? output.memories.slice(0, 3) : [];
     const changed = [];
     if (event.listening) {
@@ -278,12 +368,14 @@ export async function createApp(config, { model = companion, worker = work, logg
       return null;
     }
     let answer = output.reply;
+    if (output.action && !isReadAction(output.action)) answer += `\n\n${proposeSocial(event, output.action)}`;
     if (output.task && canWork && controller && typeof output.task.prompt === 'string' && output.task.prompt.trim() && output.task.prompt.length <= 8000 && typeof output.task.summary === 'string' && output.task.summary.trim() && output.task.summary.length <= 500) {
       answer += `\n\n${propose(key, { ...output.task, kind: 'codex' })}`;
     }
     if (changed.length && !event.listening) answer += `\n\n[记忆已更新：${changed.map(f => f.id).join('、')}，可用 /记忆 查看]`;
     await save(chatKey, [...input, { role: 'assistant', content: output.reply }].slice(-limit));
     if (event.listening) await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: true, memories: changed.length });
+    if (config.voice?.enabled && voiceMode !== 'off' && output.voice?.enabled && Array.from(output.reply).length <= (config.voice.maxCharacters || 600) && !output.action && !output.task) return { text: answer, speech: { text: output.reply, style: output.voice.style || '', explicit: false } };
     return answer;
   }
   function enqueue(event) {
@@ -324,7 +416,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       }
       if (req.method === 'GET' && path === '/api/status') {
         if (!equal(req.headers.authorization, `Bearer ${config.adminToken}`)) throw httpError(401);
-        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, uptimeSeconds: Math.floor(process.uptime()) });
+        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), uptimeSeconds: Math.floor(process.uptime()) });
       }
       if (req.method !== 'POST' || path !== '/api/onebot/event') throw httpError(404);
       if (stopping || jobs >= 32) throw httpError(503);

@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "baseUrl": "https://YOUR-WORKSPACE.cn-beijing.maas.aliyuncs.com",
+  "apiKey": "replace-locally-with-real-bailian-api-key",
+  "model": "qwen-audio-3.0-tts-plus",
+  "voiceId": "replace-with-the-voice-id-bound-to-this-model",
+  "maxCharacters": 600,
+  "dailyCharacters": 10000
+}

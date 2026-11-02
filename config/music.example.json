@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "baseUrl": "https://api.minimax.cn",
+  "apiKey": "replace-locally-with-an-independent-music-api-key",
+  "model": "music-3.0",
+  "dailySongs": 2
+}

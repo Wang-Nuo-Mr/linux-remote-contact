@@ -1,8 +1,27 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["shouldReply", "reply", "memories", "task"],
+  "required": ["shouldReply", "reply", "memories", "task", "voice", "action"],
   "properties": {
+    "voice": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "object", "additionalProperties": false, "required": ["enabled", "style"], "properties": { "enabled": { "type": "boolean" }, "style": { "type": "string" } } }
+      ]
+    },
+    "action": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "target", "content", "style", "postId"],
+          "properties": {
+            "type": { "type": "string", "enum": ["qzone_feed", "qzone_posts", "qzone_detail", "qzone_profile", "qzone_post", "nickname", "signature", "avatar", "song"] },
+            "target": { "type": "string" }, "content": { "type": "string" }, "style": { "type": "string" }, "postId": { "type": "string" }
+          }
+        }
+      ]
+    },
     "shouldReply": { "type": "boolean" },
     "reply": { "type": "string" },
     "memories": {

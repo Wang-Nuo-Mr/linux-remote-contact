@@ -7,3 +7,5 @@ node_modules/
 *.log
 coverage/
 config/identity.local.json
+config/voice.local.json
+config/music.local.json

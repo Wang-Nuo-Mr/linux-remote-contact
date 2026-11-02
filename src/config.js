@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { loadIdentity } from './groups.js';
+import { loadMediaConfig } from './media.js';
 
 export function loadConfig(env = process.env) {
   const number = (key, fallback, min, max) => {
@@ -43,5 +44,8 @@ export function loadConfig(env = process.env) {
     autoMemory: env.AUTO_MEMORY !== 'false',
     replyDelay: number('REPLY_DELAY_MS', 500, 0, 5000),
     groupDebounce: number('GROUP_DEBOUNCE_MS', 1200, 0, 5000),
+    voice: loadMediaConfig(env.TTS_CONFIG_FILE, 'voice'),
+    music: loadMediaConfig(env.MUSIC_CONFIG_FILE, 'music'),
+    socialEnabled: env.ENABLE_QQ_SOCIAL === 'true',
   };
 }

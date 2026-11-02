@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const sensitive = /(?:密码|口令|密钥|验证码|身份证|银行卡|私钥|password|api[_ -]?key|access[_ -]?token|secret|-----BEGIN|sk-[\w-]{12,})/i;
+export function containsSensitive(text) { return sensitive.test(String(text)); }
 export function safeMemory(text) {
   return typeof text === 'string' && text.trim().length > 0 && text.length <= 400 && !sensitive.test(text);
 }
