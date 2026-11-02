@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reply", "memories", "task"],
+  "properties": {
+    "reply": { "type": "string" },
+    "memories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "text"],
+        "properties": { "label": { "type": "string" }, "text": { "type": "string" } }
+      }
+    },
+    "task": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["summary", "prompt"],
+          "properties": { "summary": { "type": "string" }, "prompt": { "type": "string" } }
+        }
+      ]
+    }
+  }
+}

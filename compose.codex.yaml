@@ -1,0 +1,7 @@
+# Native Codex hub + Docker NapCat only:
+# docker compose -f compose.yaml -f compose.codex.yaml --profile qq up -d napcat
+# Run `npm start` on the host; do NOT start the hub container in this mode.
+services:
+  napcat:
+    ports:
+      - "127.0.0.1:3000:3000"

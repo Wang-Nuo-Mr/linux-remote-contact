@@ -1,6 +1,55 @@
 # Linux Remote Contact
 
-运行在 Linux / 阿里云 ECS 上的个人 QQ AI 联系中枢。通过 OneBot 11 接收 QQ 消息，调用模型，保存独立会话，并在用户确认后执行管理员定义的任务。
+运行在 Linux / 阿里云 ECS 上的个人 QQ AI 联系中枢。通过 OneBot 11 接收 QQ 消息，直接与 Codex 聊天，积累可管理的长期记忆，并在确认后执行任务。当前版本 0.2。
+
+## 你的使用路线：QQ + 现有 Codex 登录
+
+这是适合“在QQ里有一个固定窗口，能聊天、记得我、帮我办事”的配置。运行 hub 的 Linux 用户需要单独完成 Codex 登录；电脑端登录不会自动出现在服务器上。无需为这条路线另配 GPT API Key。实际用量、额度和可用模型由你的 Codex 登录账户决定，不是无限免费。
+
+1. 创建普通非 root Linux 用户，在其名下安装 Node.js 24 和官方 Codex CLI：`npm install -g @openai/codex`（版本需支持下文所用标志）。
+2. 由用户本人运行 `codex login --device-auth`，按提示在浏览器完成授权。若账户未启用设备码登录，按官方说明启用或使用官方备用登录流程；不要把凭证贴到QQ或提交Git。参考 [Codex 官方认证说明](https://developers.openai.com/codex/auth)。
+3. 克隆本项目，运行 `npm run init-env`，编辑 `.env`。保留 `MODEL_BACKEND=codex`、`ENABLE_CODEX_WORK=true`；填写 `ALLOWED_USERS`、可选 `ALLOWED_GROUPS`，以及 `CODEX_BIN` 的实际绝对路径。`CODEX_HOME` 可留空使用同一Linux用户的默认登录目录，或填写独立的实际凭证目录。
+4. NapCat 用 Docker 运行，hub 原生运行。启动 NapCat：
+
+```bash
+docker compose -f compose.yaml -f compose.codex.yaml --profile qq up -d napcat
+npm start
+```
+
+此组合不要再启动 `hub` 容器；默认镜像没有 Codex。原生 hub 使用 `.env` 中 `ONEBOT_URL=http://127.0.0.1:3000`。NapCat 的 HTTP 客户端不能再填 `http://hub:3789`：请填宿主机 Docker 网桥地址（在服务器用 `ip -4 addr show docker0` 查看）与 `/api/onebot/event`，并将原生 hub 的 `HOST` 绑定该网桥实际IPv4。NapCat HTTP服务端仍监听容器内 `0.0.0.0:3000`，覆盖文件仅把3000映射至宿主机回环地址。管理页SSH隧道相应指向该网桥地址的3789端口。保持验签与白名单；不把服务端口开放公网。也可让 OneBot 原生运行，这时 hub 保持 `HOST=127.0.0.1`，主动上报指向同机回环地址。
+
+5. 私聊发送“你好，我叫小王，喜欢详细解释”，然后 `/记忆` 检查它记住了什么；用 `/设定 你叫小诺，说话自然，遇到不确定的事情坦率说明` 设置称呼与风格。
+6. 发送“帮我写一个Python计算器，保存成文件”，Codex会在回复中提出任务。核对**实际任务内容**后，复制 `/确认 ...`。也可显式 `/干活 帮我写一个Python计算器`。完成后 `/结果 任务编号` 查看文件列表，`/文件 任务编号 calculator.py` 阅读UTF-8文本内容。
+
+聊天与任务回复均为同一个Codex生成，QQ只负责传输；没有第二个模型改写答案。回复按2800个Unicode字符分段，附编号和间隔，不再取前3500字符。消息中如有记忆/任务提示，是程序附加的操作信息。QQ实际发送成功与风控状态仍需真实联调；分段失败不会自动重发整段。
+
+## 记忆与群聊
+
+近期记忆保存最近6轮对话。长期记忆每个会话最多100条，每条400字符；每轮由**同一次Codex响应**提取最多3条非敏感偏好/约定。通过schema同时返回正文、记忆和任务提议，不额外调用模型总结回复。只有非敏感长期信息才应进入记忆，模型可能提取错误，需自行检查。显式保存/纠正的记忆不会被自动覆盖；达到100条后新条目不再自动加入，原条目仍可更新。
+
+| QQ 命令 | 行为 |
+|---|---|
+| `/记忆` | 查看当前会话的长期记忆编号、设定、自动记忆开关 |
+| `/记住 内容` | 显式保存一条非敏感信息 |
+| `/纠正 编号 新内容` | 修改记忆，并清空近期上下文，避免旧说法影响 |
+| `/忘记 编号` | 删除该条，并清空近期上下文 |
+| `/重置` | 只清空近期对话，保留长期记忆和设定 |
+| `/清空记忆` | 清空近期对话、长期记忆、设定，不删除任务文件 |
+| `/自动记忆 开` / `/自动记忆 关` | 控制当前会话自动积累；关闭后已有记忆仍参与回答 |
+| `/设定 内容` | 设置当前会话的名称和交流风格，不改变权限 |
+| `/取消` | 取消未确认任务，不能打断正在运行的任务 |
+
+私聊中是一个普通QQ联系人窗口。拉进群也可用：配置 `ALLOWED_GROUPS` 并 @ 机器人，同时发言人必须在 `ALLOWED_USERS`。私聊、各群、各用户的会话记忆与任务结果均按会话键分开，不会把私聊记忆自动带到群里。群内回复对所有群成员可见，不要在群里交办私密任务。当前不提供群成员共享记忆。
+
+长期记忆是可编辑的数据，不是重新训练模型，也不意味着它有意识或真正像儿童一样成长。记忆保存在服务器，卸载或重建时需要备份数据目录。
+
+## Codex任务边界
+
+聊天阶段使用read-only沙箱并指示Codex不调用命令；写入任务必须经过QQ确认，使用workspace-write沙箱，工作目录是新的随机任务子目录。忽略用户配置和execpolicy规则、使用临时会话以避免继承自定义MCP/钩子或更宽权限。不使用danger-full-access；不启用网络；不允许请求升级权限。`CODEX_MODEL` 可填账户可用的模型名，留空使用CLI默认模型。
+
+Codex原生沙箱不是完整的操作系统用户隔离：read-only仍可能读取同一Linux用户可读的其他文件，提示词禁止读取并不能替代文件权限。请用专门的服务用户，仅放自己授权给助手的数据；不要让不受信任的群成员进入白名单，也不要把私密文件放在服务用户能读的其他目录。需要多租户强隔离时需另加独立用户或容器沙箱。
+
+任务返回成功只表示CLI流程正常结束，不代表产物一定正确；请检查结果。超时或失败可能留有部分文件，不自动重试；服务重启不会恢复在途任务，旧的running记录可能需要人工检查。`/文件` 只允许当前会话结果目录内的UTF-8文本（最大64KB），拒绝路径穿越和越界符号链接；二进制文件通过SSH取回。任务目录互相独立，当前不支持直接继续编辑上次任务，也不支持任意远程控制整台服务器。
 
 本项目参考 [Codex-Remote-Contact](https://github.com/Epic0522/Codex-Remote-Contact) 的产品思路独立编写，没有复制其源代码。它不是原项目的 Linux 补丁，也没有原项目的全部功能。第一版支持文本，不支持 iMessage、图片理解、语音、群成员画像、自动训练和任意指令式电脑控制。
 
@@ -10,7 +59,7 @@
 - `/状态` 查看服务状态，`/重置` 清除当前会话。
 - `/任务` 查看管理员预设任务，`/运行 disk` 获取确认码，`/确认 确认码` 执行。
 - 用户、群聊、私聊之间隔离上下文，保留最近 6 轮对话并落盘。
-- API 后端支持百炼、vLLM、Ollama 的 Chat Completions 兼容接口；可选原生 Linux Codex CLI 后端。
+- 默认使用原生 Linux Codex CLI；可切换百炼、vLLM、Ollama 的兼容API后端。自动记忆提取与自然任务提议目前只接入Codex后端；API后端支持手动记忆和上下文注入。
 - Web 页面查询状态；Docker Compose、健康检查、日志、Ubuntu CI。
 
 ```mermaid
@@ -18,7 +67,7 @@ flowchart LR
   QQ[QQ 私聊 / 群聊] --> NC[NapCat OneBot 11]
   NC -->|HTTP 上报 + HMAC 签名| HUB[Linux Remote Contact]
   HUB -->|兼容 API| MODEL[百炼 / vLLM / Ollama]
-  HUB -->|可选原生部署| CLI[Codex CLI 只读沙箱]
+  HUB -->|原生部署| CLI[Codex CLI 聊天只读 / 确认后工作]
   HUB -->|白名单 + 确认码| TASK[固定任务]
   HUB -->|send_msg| NC
 ```
@@ -48,7 +97,7 @@ nano .env
 | `MODEL_BASE_URL` | 从模型服务控制台复制完整兼容接口 Base URL，不含 `/chat/completions` |
 | `MODEL_API_KEY` | 模型 API 密钥；无鉴权的本地服务可留空 |
 | `MODEL_NAME` | 模型服务提供的实际模型名称 |
-| `MODEL_BACKEND` | `api` 或 `codex`，默认 `api` |
+| `MODEL_BACKEND` | `api` 或 `codex`，示例配置默认 `codex` |
 | `ENABLE_TASKS` | 默认 `false`；确认任务配置后才改为 `true` |
 
 百炼示例以你账号的地域、业务空间实际配置为准；部分地域的 Base URL 包含 WorkspaceId，不能盲用示例地址。[百炼官方调用文档](https://help.aliyun.com/zh/model-studio/first-api-call-to-qwen)
@@ -64,7 +113,9 @@ MODEL_API_KEY=你的服务密钥
 
 Ollama 通常使用 `http://主机地址:11434/v1`。容器内 `127.0.0.1` 指容器自身，模型在宿主机时需填写容器可访问的地址；模型端口限制在私网。此项目不负责安装模型或训练模型。
 
-## 3. Docker 部署 QQ 版
+## 3. Docker 部署 API 模式 QQ 版
+
+本节仅适用于API后端，先在 `.env` 中设 `MODEL_BACKEND=api`、`ENABLE_CODEX_WORK=false`，填写对应模型信息。Codex用户按文首原生部署路线。
 
 ```bash
 docker compose --profile qq up -d --build
@@ -113,7 +164,7 @@ Compose 的 3000 端口只供容器网络访问，没有映射到公网。hub �
 }
 ```
 
-任务运行目录是 `WORKSPACE_DIR`。默认任务只查看内核和磁盘，Docker 内看到的是容器环境。任务以非 root 用户、无 shell 方式执行；环境变量不继承模型和管理密钥；60 秒确认码与会话绑定且只能消费一次。单任务输出最多 12 KB，QQ 回复最多 3500 字符。Linux 超时/超限时终止进程组。
+预设任务运行目录是 `WORKSPACE_DIR`。默认预设任务只查看内核和磁盘，Docker 内看到的是容器环境。任务以非 root 用户、无 shell 方式执行；环境变量不继承模型和管理密钥；60 秒确认码与会话绑定且只能消费一次。预设任务输出上限12KB，超限会终止进程并明确提示；QQ回复分段发送。Linux 超时/超限时终止进程组。
 
 这不是任意程序的完整安全沙箱：管理员配置的程序仍有当前运行用户的文件权限。不要配置 `sh -c`、`sudo` 或任意 Python eval 等可绕过固定参数限制的入口。需要训练/部署任务时，写一个固定参数脚本，并限制挂载目录和资源；不要给 hub 挂载 Docker socket。
 
@@ -136,9 +187,9 @@ CODEX_HOME=/运行用户的实际目录/.codex
 MODEL_TIMEOUT_MS=180000
 ```
 
-程序使用 `codex exec --sandbox read-only --skip-git-repo-check --output-last-message <临时文件> -`，通过 stdin 传递 JSON 对话。仅使用运行用户已登录的 Codex 凭证；不会自动登录、购买套餐或绕过服务地区限制。参考 [Codex 非交互调用官方文档](https://developers.openai.com/codex/noninteractive)。不要把 Codex 凭证目录与 API 密钥文件放进任务工作目录。
+程序使用 `codex --ask-for-approval never exec --sandbox read-only --skip-git-repo-check --output-last-message <临时文件> --ignore-user-config --ignore-rules --ephemeral --output-schema <schema> -`，通过 stdin 传递 JSON 对话；确认后任务使用workspace-write，不带聊天schema。CLI需支持这些官方标志，不支持时升级或参考对应版本文档，不要删除沙箱参数。仅使用运行用户已登录的 Codex 凭证；不会自动登录、购买套餐或绕过服务地区限制。参考 [Codex 非交互调用官方文档](https://developers.openai.com/codex/noninteractive)。不要把 Codex 凭证目录与 API 密钥文件放进任务工作目录。
 
-CLI 在只读沙箱中回答，**不会自主修改服务器文件**。写入操作通过单独的预设任务完成。CLI 沙箱不是用户间文件隔离，各会话不要放置不同用户的机密文件。默认 Docker 镜像不含 Codex，Codex 模式请使用原生 Linux；不要为了运行 CLI 关闭容器安全限制。
+CLI在聊天阶段只读回答，写入通过确认后任务完成。CLI沙箱不是用户间文件隔离，各会话不要放置不同用户的机密文件。默认Docker镜像不含Codex，Codex模式请使用原生Linux；不要为了运行CLI关闭容器安全限制。
 
 可选 API 模式 systemd 模板见 `deploy/linux-remote-contact.service`；把 `/opt/linux-remote-contact`、Node 路径和 `contact` 用户改为实际值，不要使用 root。systemd 使用绝对配置路径，运行前先创建 data/workspace 并确认目录权限。模板的 `ProtectHome=true` 会阻止访问 home 内 Codex 凭证，不可直接用于 Codex 模式；Codex 应单独部署并按实际凭证位置配置文件访问。
 
@@ -168,4 +219,4 @@ docker build -t linux-remote-contact:test .
 
 ## 与原思路的差别
 
-保留联系中枢、会话、远程确认、模型后端的结构；把 macOS 专属消息数据库、AppleScript、Shadowrocket 依赖移除。原项目是 Mac 本机全能控制，本项目第一版是 Linux 文本联系与固定任务服务。需要 iMessage 时可以另接 Mac 网关，不是安装 Linux 就能拥有 iMessage。
+保留联系中枢、会话、远程确认、模型后端的结构；把 macOS 专属消息数据库、AppleScript、Shadowrocket 依赖移除。当前提供Linux文本聊天、可管理长期记忆与确认后Codex工作目录任务。需要iMessage时可以另接Mac网关，不是安装Linux就能拥有iMessage。

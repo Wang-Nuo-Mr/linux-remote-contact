@@ -34,5 +34,10 @@ export function loadConfig(env = process.env) {
     apiKey: env.MODEL_API_KEY || '', model: env.MODEL_NAME || 'qwen-plus',
     timeout: number('MODEL_TIMEOUT_MS', 90000, 100, 300000),
     codexBin: env.CODEX_BIN || 'codex', codexHome: env.CODEX_HOME || '',
+    codexModel: env.CODEX_MODEL || '',
+    codexWork: env.ENABLE_CODEX_WORK === 'true',
+    workTimeout: number('CODEX_WORK_TIMEOUT_MS', 300000, 1000, 900000),
+    autoMemory: env.AUTO_MEMORY !== 'false',
+    replyDelay: number('REPLY_DELAY_MS', 500, 0, 5000),
   };
 }
