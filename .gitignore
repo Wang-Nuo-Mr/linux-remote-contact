@@ -6,3 +6,4 @@ workspace/
 node_modules/
 *.log
 coverage/
+config/identity.local.json

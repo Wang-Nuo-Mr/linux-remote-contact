@@ -124,3 +124,11 @@ docker compose --env-file .env -f deploy/ecs-compose.yaml stop napcat
 - 在与生产 hub 相同的 systemd 用户、文件写入范围和保护选项下，真实 Codex 结构化聊天通过，workspace-write 创建指定检查文件通过；检查文件随后删除。没有写入聊天记忆，也没有代替用户确认 QQ 任务。
 - 首次 NapCat v4.18.41 扫码后卡在 initializing、coreReady=false。升级固定镜像 v4.18.42、采用单进程兼容配置并由本人重新扫码后，QQ 状态 ready、coreReady=true；OneBot get_login_info 返回预期机器人账号，get_status 返回 online=true、good=true。
 - 已看到主号私聊事件；OneBot 上报连接无401或连接错误，hub 无 message_failed/reply_failed。真实一轮聊天已落盘，用户本人确认 QQ 收发成功。记忆管理、长回复分段和 QQ 端任务确认流程已有自动测试，仍建议本人按需体验；本次未逐项执行真实 QQ 验收。
+
+### 小群模式升级（0.3）
+
+本次增加指定小群全消息判断、共享群上下文、按QQ号隔离的个人档案，以及独立的新成员列表。运行时身份配置放在 `/etc/linux-contact/identity.json`，root:contact、640，父目录750；`.env` 用 `COMPANION_IDENTITY_FILE` 指向它。创造者关系每轮注入，不进入可删除的普通记忆。个人资料不随源码上传，后续维护需单独备份该配置和 data/groups、data/memories。
+
+升级先在独立 staging 目录通过全部14项 Linux 测试，再以生产同样的 systemd 保护设置实际调用 Codex，验证静默响应和无需@时回答创造者身份。切换前备份旧源码与运行环境，确认没有在途任务后只重启 hub；没有重启 QQ 容器，也没有清空私聊。新成员只获得该指定群的聊天与本人记忆操作权限，服务器任务与群管理仍由创造者操作。
+
+用户本人已确认真实群回复成功；审计记录也确认不同成员的发言分别进入上下文，并出现主动沉默决策。首次调用较慢造成逐条排队，随后增加默认1.2秒连续消息合并及忙碌期间的下一批收集；新版15项 Linux 测试全部通过，实际 Codex 在同一批消息中正确选择沉默并把两位发言者的偏好分别标到各自QQ号。此真实模型检查未写入生产人物资料。管理命令形成批次边界；每批最多提取3条长期记忆，禁止更新未在该批发言的成员档案。

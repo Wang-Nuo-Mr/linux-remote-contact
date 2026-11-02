@@ -7,6 +7,7 @@ import { loadTasks, runProcess } from './tasks.js';
 import { MemoryStore, memoryContext, safeMemory } from './memory.js';
 import { splitReply } from './delivery.js';
 import { Results } from './results.js';
+import { GroupDirectory, displayName } from './groups.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 function equal(a, b) {
@@ -32,21 +33,34 @@ function send(res, status, body) {
 }
 
 export function parseEvent(event, config) {
-  if (event.post_type !== 'message' || !['private', 'group'].includes(event.message_type)) return null;
+  const memberNotice = event.post_type === 'notice' && event.notice_type === 'group_increase';
+  if (!memberNotice && (event.post_type !== 'message' || !['private', 'group'].includes(event.message_type))) return null;
+  const type = memberNotice ? 'group' : event.message_type;
   if (!Number.isSafeInteger(Number(event.self_id)) || Number(event.self_id) <= 0) return null;
   const user = String(event.user_id || ''), group = String(event.group_id || '');
-  if (!config.allowedUsers.has(user) || String(event.self_id) === user) return null;
+  if (String(event.self_id) === user) return null;
   if (!Number.isSafeInteger(Number(event.user_id)) || Number(event.user_id) <= 0) return null;
-  if (event.message_type === 'group' && (!config.allowedGroups.has(group) || !Number.isSafeInteger(Number(group)) || Number(group) <= 0)) return null;
+  if (type === 'group' && (!config.allowedGroups.has(group) || !Number.isSafeInteger(Number(group)) || Number(group) <= 0)) return null;
+  const policy = type === 'group' ? config.listeningGroups?.get(group) : null;
+  if (!policy && (memberNotice || !config.allowedUsers.has(user))) return null;
+  if (!Number.isFinite(event.time) || Math.abs(Date.now() / 1000 - event.time) > 300) return null;
+  const key = `${type}:${group}:${user}`;
+  const speaker = policy ? policy.members.get(user) || { qq: user, name: displayName(event.sender?.card || event.sender?.nickname, user) } : null;
+  if (memberNotice) return { key, user, group, text: '', type, listening: true, memberNotice: true, speaker, conversationKey: `group:${group}:shared`, id: `${event.self_id}:join:${group}:${user}:${event.time}`, time: event.time };
   // Require array format: avoids treating CQ codes as commands or mentions.
   if (!Array.isArray(event.message) || event.message.some(s => !s || typeof s !== 'object')) return null;
-  if (event.message_type === 'group' && !event.message.some(s => s.type === 'at' && String(s.data?.qq) === String(event.self_id))) return null;
-  const text = event.message.filter(s => s.type === 'text').map(s => String(s.data?.text || '')).join('').trim();
+  const mentioned = event.message.some(s => s.type === 'at' && String(s.data?.qq) === String(event.self_id));
+  if (type === 'group' && !policy && !mentioned) return null;
+  const segmentTypes = [...new Set(event.message.filter(s => s.type !== 'text').map(s => String(s.type).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)).filter(Boolean))].slice(0, 10);
+  let text = event.message.filter(s => s.type === 'text').map(s => String(s.data?.text || '')).join('').trim();
+  if (!text && policy && segmentTypes.length) text = `[非文本消息：${segmentTypes.join('、')}；未解析内容]`;
   if (!text || text.length > 8000 || event.message_id === undefined) return null;
   // Reject stale/future signed events to bound replay window.
   if (!Number.isFinite(event.time) || Math.abs(Date.now() / 1000 - event.time) > 300) return null;
-  const key = `${event.message_type}:${group}:${user}`;
-  return { key, user, group, text, type: event.message_type, id: `${event.self_id}:${key}:${event.message_id}` };
+  // Shared conversation/queue; permissions, profiles and confirmations stay per sender.
+  return { key, user, group, text, type, id: `${event.self_id}:${key}:${event.message_id}`, listening: Boolean(policy), mentioned, segmentTypes,
+    conversationKey: policy ? `group:${group}:shared` : key,
+    speaker, time: event.time };
 }
 
 export async function createApp(config, { model = companion, worker = work, logger = console } = {}) {
@@ -54,17 +68,18 @@ export async function createApp(config, { model = companion, worker = work, logg
   await mkdir(config.workspace, { recursive: true, mode: 0o700 });
   const tasks = config.enableTasks ? await loadTasks(config.tasksFile) : {};
   const memories = new MemoryStore(config.dataDir, config.autoMemory);
+  const directory = new GroupDirectory(config.dataDir, config.listeningGroups);
   const results = new Results(config.dataDir, config.workspace);
-  const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map();
+  const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map(), groupBatches = new Map();
   let jobs = 0, persist = Promise.resolve(), auditing = Promise.resolve(), stopping = false;
   const logPath = join(config.dataDir, 'audit.jsonl');
   const sessionPath = key => join(config.dataDir, `${createHash('sha256').update(key).digest('hex')}.json`);
-  async function history(key) {
+  async function history(key, limit = 12) {
     if (!sessions.has(key)) {
       try {
         const data = JSON.parse(await readFile(sessionPath(key), 'utf8'));
         if (!Array.isArray(data) || data.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Corrupt history');
-        sessions.set(key, data.slice(-12));
+        sessions.set(key, data.slice(-limit));
       } catch (error) { if (error.code !== 'ENOENT') throw error; sessions.set(key, []); }
     }
     return sessions.get(key);
@@ -109,20 +124,39 @@ export async function createApp(config, { model = companion, worker = work, logg
   const canWork = config.backend === 'codex' && config.codexWork;
   async function handle(event) {
     const { key, text } = event;
+    const batch = event.batch || [event];
+    if (event.listening) for (const message of batch) message.speaker = await directory.observe(message);
+    if (event.memberNotice) return null;
+    const chatKey = event.conversationKey, limit = event.listening ? 60 : 12;
+    const controller = !event.listening || event.user === config.creator?.qq;
+    const settingsKey = event.listening ? `group:${event.group}:assistant` : key;
+    if (!controller && /^\/(?:干活|运行|确认|设定|重置)(?:\s|$)/.test(text)) return `这项管理或执行操作仅由创造者${config.creator.name}的账号授权。`;
     const now = Date.now();
     for (const [token, item] of pending) if (item.expires <= now) pending.delete(token);
-    if (text === '/帮助' || text === '/help') return '/状态 /重置 /记忆 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n普通文字直接聊天，群聊需要@机器人。记忆按会话隔离。';
-    if (text === '/状态') return `Linux Remote Contact 在线\n模型后端：${config.backend}\n排队/运行：${jobs}\nCodex工作模式：${canWork ? '已启用' : '关闭'}\n预设任务：${config.enableTasks ? '已启用' : '关闭'}`;
-    if (text === '/重置') { await save(key, []); return '近期对话已清空，长期记忆与角色设定保留。'; }
+    if (text === '/帮助' || text === '/help') return `/状态 /重置 /记忆 /认识 /新成员 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n${event.listening ? '本群无需@，由Codex判断是否开口。个人记忆按QQ号区分，任务与群管理仅创造者可操作。' : '普通文字直接聊天，普通群聊需要@机器人。记忆按会话隔离。'}`;
+    if (text === '/状态') return `Linux Remote Contact 在线\n模型后端：${config.backend}\n排队/运行：${jobs}\n群聊模式：${event.listening ? '全消息理解，自主决定回复' : '私聊或@触发'}\nCodex工作模式：${canWork && controller ? '已启用' : '关闭或无执行权限'}\n预设任务：${config.enableTasks ? '已启用' : '关闭'}`;
+    if (text === '/重置') { await save(chatKey, []); return '近期对话已清空，长期记忆、角色设定与固定创造者身份保留。'; }
+    if (text === '/新成员' && event.listening) {
+      const people = (await directory.members(event.group)).filter(m => m.status === 'new');
+      return `新成员／待了解：\n${people.map(m => `${m.name}（QQ ${m.qq}）`).join('\n') || '暂无新成员。'}`;
+    }
+    if (text === '/认识' && event.listening) {
+      const people = [];
+      for (const member of await directory.members(event.group)) {
+        const state = await memories.get(`group:${event.group}:${member.qq}`);
+        people.push(`${member.name}（QQ ${member.qq}${member.qq === config.creator.qq ? '，创造者' : member.status === 'new' ? '，新成员／待了解' : ''}）：\n${state.facts.map(f => `${f.id}：${f.text}`).join('\n') || '还在逐渐了解。'}`);
+      }
+      return people.join('\n\n');
+    }
     if (text === '/记忆') {
       const state = await memories.get(key);
-      return `本会话长期记忆（${state.facts.length}/100），自动记忆：${state.automatic ? '开' : '关'}\n角色设定：${state.persona || '默认'}\n${state.facts.map(f => `${f.id}：${f.text}`).join('\n') || '尚无长期记忆。'}`;
+      return `${event.listening ? `${event.speaker.name}的个人` : '本会话'}长期记忆（${state.facts.length}/100），自动记忆：${state.automatic ? '开' : '关'}\n角色设定：${(await memories.get(settingsKey)).persona || '默认'}\n${state.facts.map(f => `${f.id}：${f.text}`).join('\n') || '尚无长期记忆。'}${config.creator ? `\n固定身份：${config.creator.name}（QQ ${config.creator.qq}）是创造者，普通记忆命令不会修改。` : ''}`;
     }
     if (text === '/清空记忆') {
       const { automatic } = await memories.get(key);
       await memories.put(key, { facts: [], persona: '', automatic });
-      await save(key, []);
-      return '本会话的长期记忆、角色设定与近期对话已清空；任务产物不受影响。';
+      if (!event.listening) await save(chatKey, []);
+      return event.listening ? '你在本群的个人记忆已清空；其他成员、群上下文和固定创造者身份保留。' : '本会话的长期记忆、角色设定与近期对话已清空；任务产物及固定创造者身份不受影响。';
     }
     if (text.startsWith('/自动记忆 ')) {
       const value = text.slice(6).trim();
@@ -133,7 +167,7 @@ export async function createApp(config, { model = companion, worker = work, logg
     if (text.startsWith('/设定 ')) {
       const value = text.slice(4).trim();
       if (!value || value.length > 1000) return '设定长度须为1～1000字符。';
-      const state = await memories.get(key); state.persona = value; await memories.put(key, state);
+      const state = await memories.get(settingsKey); state.persona = value; await memories.put(settingsKey, state);
       return '角色名称与交流风格设定已保存；不会改变任务权限。';
     }
     if (text.startsWith('/记住 ')) {
@@ -152,8 +186,9 @@ export async function createApp(config, { model = companion, worker = work, logg
         if (!safeMemory(content)) return '纠正内容须为400字符以内的非敏感信息。';
         state.facts[index] = { ...state.facts[index], text: content.trim(), source: 'manual', updatedAt: new Date().toISOString() };
       } else state.facts.splice(index, 1);
-      await memories.put(key, state); await save(key, []);
-      return '记忆已更新，近期对话也已清空，避免旧说法继续影响回答。';
+      await memories.put(key, state);
+      if (!event.listening) await save(chatKey, []);
+      return event.listening ? '你的个人记忆已更新，下一次判断将以新的个人档案为准；群上下文保留。' : '记忆已更新，近期对话也已清空，避免旧说法继续影响回答。';
     }
     if (text === '/取消') {
       for (const [token, item] of pending) if (item.key === key) pending.delete(token);
@@ -197,7 +232,7 @@ export async function createApp(config, { model = companion, worker = work, logg
         await results.put(result);
         await audit({ kind: 'codex-end', user: event.user, result: result.id, status: result.status });
         const answer = `任务 ${result.id}：${result.status}\n${result.output}\n查看产物：/结果 ${result.id}`;
-        await save(key, [...await history(key), { role: 'user', content: `已确认任务：${item.summary}` }, { role: 'assistant', content: answer }].slice(-12));
+        await save(chatKey, [...await history(chatKey, limit), { role: 'user', content: event.listening ? JSON.stringify({ speaker: event.speaker, text: `已确认任务：${item.summary}` }) : `已确认任务：${item.summary}` }, { role: 'assistant', content: answer }].slice(-limit));
         return answer;
       }
       const task = tasks[item.name];
@@ -206,30 +241,72 @@ export async function createApp(config, { model = companion, worker = work, logg
       await audit({ kind: 'task-end', user: event.user, task: item.name, code: result.code, timedOut: result.timedOut, truncated: result.truncated });
       return `任务 ${item.name}：退出码 ${result.code}${result.timedOut ? '，超时已终止' : ''}${result.truncated ? '，输出超限已终止' : ''}\n${result.output || '（无输出）'}`;
     }
-    if (text.startsWith('/')) return '未知命令。发送 /帮助 查看。';
-    const previous = await history(key);
-    const input = [...previous, { role: 'user', content: text }].slice(-13);
+    if (text.startsWith('/') && !event.listening) return '未知命令。发送 /帮助 查看。';
+    const previous = await history(chatKey, limit);
+    const incoming = batch.map(message => ({ role: 'user', content: event.listening ? JSON.stringify({ speaker: message.speaker, text: message.text, time: message.time, mentionedAssistant: message.mentioned, segmentTypes: message.segmentTypes }) : message.text }));
+    const input = [...previous, ...incoming].slice(-limit - 1);
     const state = await memories.get(key);
-    const response = await model(config, input, { ...memoryContext(state), workEnabled: canWork });
+    const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant };
+    if (event.listening) {
+      context.persona = (await memories.get(settingsKey)).persona;
+      context.group = { id: event.group, mode: 'listen', speaker: event.speaker, newMessages: batch.map(message => ({ speaker: message.speaker, text: message.text })), participants: [] };
+      for (const member of await directory.members(event.group)) {
+        const profile = await memories.get(`group:${event.group}:${member.qq}`);
+        context.group.participants.push({ ...member, creator: member.qq === config.creator.qq, facts: memoryContext(profile).facts, automatic: profile.automatic });
+      }
+    }
+    // Retain every accepted group message, even when the model stays silent/fails.
+    if (event.listening) await save(chatKey, input.slice(-limit));
+    const response = await model(config, input, context);
     const output = typeof response === 'string' ? { reply: response, memories: [], task: null } : response;
-    if (!output || typeof output.reply !== 'string' || !output.reply.trim()) throw new Error('Invalid reply');
-    const changed = await memories.remember(key, Array.isArray(output.memories) ? output.memories : []);
+    if (!output || typeof output.reply !== 'string' || (event.listening && typeof output.shouldReply !== 'boolean') || (!(event.listening && output.shouldReply === false) && !output.reply.trim())) throw new Error('Invalid reply');
+    const entries = Array.isArray(output.memories) ? output.memories.slice(0, 3) : [];
+    const changed = [];
+    if (event.listening) {
+      const speakers = new Set(batch.map(message => message.user));
+      const bySpeaker = new Map();
+      for (const entry of entries) {
+        const subject = entry?.subject ?? event.user;
+        if (!speakers.has(subject)) continue;
+        if (!bySpeaker.has(subject)) bySpeaker.set(subject, []);
+        bySpeaker.get(subject).push(entry);
+      }
+      for (const [subject, facts] of bySpeaker) changed.push(...await memories.remember(`group:${event.group}:${subject}`, facts));
+    } else changed.push(...await memories.remember(key, entries));
+    if (event.listening && output.shouldReply === false) {
+      await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: false, memories: changed.length });
+      return null;
+    }
     let answer = output.reply;
-    if (output.task && canWork && typeof output.task.prompt === 'string' && output.task.prompt.trim() && output.task.prompt.length <= 8000 && typeof output.task.summary === 'string' && output.task.summary.trim() && output.task.summary.length <= 500) {
+    if (output.task && canWork && controller && typeof output.task.prompt === 'string' && output.task.prompt.trim() && output.task.prompt.length <= 8000 && typeof output.task.summary === 'string' && output.task.summary.trim() && output.task.summary.length <= 500) {
       answer += `\n\n${propose(key, { ...output.task, kind: 'codex' })}`;
     }
-    if (changed.length) answer += `\n\n[记忆已更新：${changed.map(f => f.id).join('、')}，可用 /记忆 查看]`;
-    await save(key, [...input, { role: 'assistant', content: output.reply }].slice(-12));
+    if (changed.length && !event.listening) answer += `\n\n[记忆已更新：${changed.map(f => f.id).join('、')}，可用 /记忆 查看]`;
+    await save(chatKey, [...input, { role: 'assistant', content: output.reply }].slice(-limit));
+    if (event.listening) await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: true, memories: changed.length });
     return answer;
   }
   function enqueue(event) {
-    const previous = chains.get(event.key) || Promise.resolve();
+    const queueKey = event.conversationKey;
+    const batchable = event.listening && !event.memberNotice && !event.text.startsWith('/');
+    if (batchable && groupBatches.has(queueKey)) { groupBatches.get(queueKey).push(event); jobs++; return; }
+    // Commands/notices seal the previous batch, preserving their arrival order.
+    if (!batchable) groupBatches.delete(queueKey);
+    const batch = [event];
+    if (batchable) groupBatches.set(queueKey, batch);
+    const previous = chains.get(queueKey) || Promise.resolve();
     jobs++;
     const job = previous.then(async () => {
-      try { await reply(event, await handle(event)); }
-      catch { logger.error('message_failed'); await reply(event, '处理失败，请管理员检查模型、OneBot与服务日志；本条不会自动重试。').catch(() => logger.error('reply_failed')); }
-    }).finally(() => { jobs--; if (chains.get(event.key) === job) chains.delete(event.key); });
-    chains.set(event.key, job);
+      if (batchable) {
+        await delay(config.groupDebounce ?? 1200);
+        if (groupBatches.get(queueKey) === batch) groupBatches.delete(queueKey);
+      }
+      const current = batch.at(-1);
+      if (batchable) current.batch = batch;
+      try { const answer = await handle(current); if (answer !== null) await reply(current, answer); }
+      catch { logger.error('message_failed'); if (!current.listening || batch.some(message => message.mentioned) || current.text.startsWith('/')) await reply(current, '处理失败，请管理员检查模型、OneBot与服务日志；本条不会自动重试。').catch(() => logger.error('reply_failed')); }
+    }).finally(() => { jobs -= batch.length; if (chains.get(queueKey) === job) chains.delete(queueKey); });
+    chains.set(queueKey, job);
   }
   const server = createServer(async (req, res) => {
     try {
@@ -247,7 +324,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       }
       if (req.method === 'GET' && path === '/api/status') {
         if (!equal(req.headers.authorization, `Bearer ${config.adminToken}`)) throw httpError(401);
-        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, uptimeSeconds: Math.floor(process.uptime()) });
+        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, uptimeSeconds: Math.floor(process.uptime()) });
       }
       if (req.method !== 'POST' || path !== '/api/onebot/event') throw httpError(404);
       if (stopping || jobs >= 32) throw httpError(503);
@@ -263,7 +340,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       if (seen.has(event.id)) return send(res, 200, {});
       if (seen.size >= 10000) throw httpError(503);
       const rate = rates.get(event.user);
-      if (rate && now - rate.start < 60000 && rate.count >= 15) throw httpError(429);
+      if (rate && now - rate.start < 60000 && rate.count >= (event.listening ? 60 : 15)) throw httpError(429);
       rates.set(event.user, rate && now - rate.start < 60000 ? { start: rate.start, count: rate.count + 1 } : { start: now, count: 1 });
       seen.set(event.id, now + 600000);
       enqueue(event);

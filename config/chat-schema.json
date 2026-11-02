@@ -1,16 +1,17 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["reply", "memories", "task"],
+  "required": ["shouldReply", "reply", "memories", "task"],
   "properties": {
+    "shouldReply": { "type": "boolean" },
     "reply": { "type": "string" },
     "memories": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["label", "text"],
-        "properties": { "label": { "type": "string" }, "text": { "type": "string" } }
+        "required": ["subject", "label", "text"],
+        "properties": { "subject": { "type": ["string", "null"] }, "label": { "type": "string" }, "text": { "type": "string" } }
       }
     },
     "task": {

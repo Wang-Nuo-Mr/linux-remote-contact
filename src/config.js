@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { loadIdentity } from './groups.js';
 
 export function loadConfig(env = process.env) {
   const number = (key, fallback, min, max) => {
@@ -23,10 +24,12 @@ export function loadConfig(env = process.env) {
   const onebotSecret = secret('ONEBOT_SECRET');
   const onebotToken = secret('ONEBOT_TOKEN');
   if (new Set([adminToken, onebotSecret, onebotToken]).size !== 3) throw new Error('Use three different secrets');
+  const allowedUsers = ids('ALLOWED_USERS'), allowedGroups = ids('ALLOWED_GROUPS');
+  const identity = loadIdentity(env.COMPANION_IDENTITY_FILE, { allowedUsers, allowedGroups, backend });
   return {
     host: env.HOST || '127.0.0.1', port: number('PORT', 3789, 0, 65535),
     adminToken, onebotSecret, onebotToken,
-    allowedUsers: ids('ALLOWED_USERS'), allowedGroups: ids('ALLOWED_GROUPS'),
+    allowedUsers, allowedGroups, ...identity,
     onebotUrl: url('ONEBOT_URL', 'http://127.0.0.1:3000'),
     dataDir: resolve(env.DATA_DIR || './data'), workspace: resolve(env.WORKSPACE_DIR || './workspace'),
     tasksFile: resolve(env.TASKS_FILE || './config/tasks.json'), enableTasks: env.ENABLE_TASKS === 'true',
@@ -39,5 +42,6 @@ export function loadConfig(env = process.env) {
     workTimeout: number('CODEX_WORK_TIMEOUT_MS', 300000, 1000, 900000),
     autoMemory: env.AUTO_MEMORY !== 'false',
     replyDelay: number('REPLY_DELAY_MS', 500, 0, 5000),
+    groupDebounce: number('GROUP_DEBOUNCE_MS', 1200, 0, 5000),
   };
 }

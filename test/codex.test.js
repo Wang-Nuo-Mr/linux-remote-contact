@@ -37,7 +37,7 @@ process.stdin.on('end', () => {
  if(args.includes('--output-schema')) {
    if(sandbox!=='read-only') process.exit(2);
    JSON.parse(fs.readFileSync(args[args.indexOf('--output-schema')+1], 'utf8'));
-   fs.writeFileSync(args[args.indexOf('--output-last-message')+1], JSON.stringify({reply:'你好',memories:[{label:'name',text:'称呼用户小王'}],task:null}));
+   fs.writeFileSync(args[args.indexOf('--output-last-message')+1], JSON.stringify({shouldReply:true,reply:'你好',memories:[{subject:null,label:'name',text:'称呼用户小王'}],task:null}));
  } else {
    if(sandbox!=='workspace-write') process.exit(3);
    fs.writeFileSync('answer.txt','42');
