@@ -32,7 +32,7 @@ test('listening is confined to one group, separates newcomers, never grants priv
   assert.equal(parseEvent({...event(),group_id:20002},config),null);
   assert.equal(parseEvent({...event('10002'),message_type:'private'},config),null);
   assert.equal(parseEvent({...event(),user_id:99999},config),null);
-  assert.match(parseEvent({...event(),message:[{type:'image',data:{url:'not-loaded'}}]},config).text,/非文本消息/);
+  assert.equal(parseEvent({...event(),message:[{type:'image',data:{url:'not-loaded'}}]},config).text,'[收到图片]');
   assert.match(fixedIdentityPrompt(config),/10001/);
   assert.throws(()=>loadConfig({...env,COMPANION_IDENTITY_FILE:file,ALLOWED_GROUPS:''}));
   assert.throws(()=>loadConfig({...env,COMPANION_IDENTITY_FILE:file,MODEL_BACKEND:'api'}));

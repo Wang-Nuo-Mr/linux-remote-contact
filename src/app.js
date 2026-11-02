@@ -11,6 +11,7 @@ import { GroupDirectory, displayName } from './groups.js';
 import { SpeechService, MusicService, UsageBudget } from './media.js';
 import { onebot, isSocialOwner, validateAction, isReadAction, actionSummary, readSocial, writeSocial } from './social.js';
 import { setTimeout as delay } from 'node:timers/promises';
+import { imageReferences, prepareImages } from './images.js';
 
 function equal(a, b) {
   return typeof a === 'string' && timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
@@ -55,17 +56,19 @@ export function parseEvent(event, config) {
   if (type === 'group' && !policy && !mentioned) return null;
   const segmentTypes = [...new Set(event.message.filter(s => s.type !== 'text').map(s => String(s.type).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)).filter(Boolean))].slice(0, 10);
   let text = event.message.filter(s => s.type === 'text').map(s => String(s.data?.text || '')).join('').trim();
+  const imageRefs = imageReferences(event.message);
+  if (!text && imageRefs.length) text = '[收到图片]';
   if (!text && policy && segmentTypes.length) text = `[非文本消息：${segmentTypes.join('、')}；未解析内容]`;
   if (!text || text.length > 8000 || event.message_id === undefined) return null;
   // Reject stale/future signed events to bound replay window.
   if (!Number.isFinite(event.time) || Math.abs(Date.now() / 1000 - event.time) > 300) return null;
   // Shared conversation/queue; permissions, profiles and confirmations stay per sender.
-  return { key, user, group, text, type, id: `${event.self_id}:${key}:${event.message_id}`, listening: Boolean(policy), mentioned, segmentTypes,
+  return { key, user, group, text, type, imageRefs, id: `${event.self_id}:${key}:${event.message_id}`, listening: Boolean(policy), mentioned, segmentTypes,
     conversationKey: policy ? `group:${group}:shared` : key,
     speaker, time: event.time };
 }
 
-export async function createApp(config, { model = companion, worker = work, logger = console, speech, music, socialRead = readSocial, socialWrite = writeSocial } = {}) {
+export async function createApp(config, { model = companion, worker = work, logger = console, speech, music, socialRead = readSocial, socialWrite = writeSocial, imageLoader = prepareImages } = {}) {
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   await mkdir(config.workspace, { recursive: true, mode: 0o700 });
   const tasks = config.enableTasks ? await loadTasks(config.tasksFile) : {};
@@ -143,7 +146,7 @@ export async function createApp(config, { model = companion, worker = work, logg
   }
   const canWork = config.backend === 'codex' && config.codexWork;
   function capabilities(event, voiceMode = 'auto') {
-    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, textOnlyInputs: true };
+    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, imageInput: config.backend === 'codex', textOnlyInputs: config.backend !== 'codex' };
   }
   function formatRead(data) {
     if (data.items) return data.items.map((item, i) => `${i + 1}. ${item.nickname || item.qq || '动态'}${item.qq ? `（${item.qq}）` : ''}\n${item.text || '无可读取文字'}${item.imageCount ? `\n[含${item.imageCount}张图片，尚未识图]` : ''}${item.postId ? `\nTid：${item.postId}` : ''}`).join('\n\n') || '接口返回列表为空。';
@@ -166,7 +169,7 @@ export async function createApp(config, { model = companion, worker = work, logg
     if (!controller && /^\/(?:干活|运行|确认|设定|重置|语音模式)(?:\s|$)/.test(text)) return `这项管理或执行操作仅由创造者${config.creator.name}的账号授权。`;
     const now = Date.now();
     for (const [token, item] of pending) if (item.expires <= now) pending.delete(token);
-    if (text === '/能力' || text === '/自身说明') return `我由${config.creator?.name || '管理员'}部署在Ubuntu服务器上，使用${config.backend}生成回复。\n语音：${config.voice?.enabled ? '已配置，文字和语音对应，可按语境调整语气' : '未配置'}\n音乐生成：${config.music?.enabled ? '已配置独立音乐服务' : '未配置，不能用语音API直接冒充唱歌'}\nQQ空间与资料：${config.socialEnabled ? '已启用；创造者私聊可读取，写入需确认' : '未启用'}\n${config.listeningGroups.size ? '指定群无需@，由我判断是否回答；' : ''}每个人的记忆独立，固定创造者身份保留。\n我不自动知道桌面端完整部署过程，也没有图片/语音输入理解能力。`;
+    if (text === '/能力' || text === '/自身说明') return `我由${config.creator?.name || '管理员'}部署在Ubuntu服务器上，使用${config.backend}生成回复。\n语音：${config.voice?.enabled ? '已配置，文字和语音对应，可按语境调整语气' : '未配置'}\n音乐生成：${config.music?.enabled ? '已配置独立音乐服务' : '未配置，不能用语音API直接冒充唱歌'}\nQQ空间与资料：${config.socialEnabled ? '已启用；创造者私聊可读取，写入需确认' : '未启用'}\n${config.listeningGroups.size ? '指定群无需@，由我判断是否回答；' : ''}每个人的记忆独立，固定创造者身份保留。\n图片：${config.backend === 'codex' ? '支持当前消息的PNG、JPEG、WebP原图理解' : '当前后端未接入'}；语音输入尚未转写。\n我不自动知道桌面端完整部署过程。`;
     if (text === '/声线') return config.voice?.enabled ? `已配置固定音色，模型：${config.voice.model}。\n/语音 内容：直接朗读\n/语音模式 自动、按需、关闭：切换当前会话的语音方式。` : '百炼声线尚未配置完成。';
     if (text.startsWith('/语音模式 ')) {
       const mode = text.slice(6).trim();
@@ -321,62 +324,68 @@ export async function createApp(config, { model = companion, worker = work, logg
       return `任务 ${item.name}：退出码 ${result.code}${result.timedOut ? '，超时已终止' : ''}${result.truncated ? '，输出超限已终止' : ''}\n${result.output || '（无输出）'}`;
     }
     if (text.startsWith('/') && !event.listening) return '未知命令。发送 /帮助 查看。';
-    const previous = await history(chatKey, limit);
-    const incoming = batch.map(message => ({ role: 'user', content: event.listening ? JSON.stringify({ speaker: message.speaker, text: message.text, time: message.time, mentionedAssistant: message.mentioned, segmentTypes: message.segmentTypes }) : message.text }));
-    const input = [...previous, ...incoming].slice(-limit - 1);
-    const state = await memories.get(key);
-    const settings = await memories.get(settingsKey);
-    const voiceMode = { 自动: 'auto', 按需: 'requested', 关闭: 'off' }[settings.voiceMode] || 'auto';
-    const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant, capabilities: capabilities(event, voiceMode) };
-    if (event.listening) {
-      context.persona = (await memories.get(settingsKey)).persona;
-      context.group = { id: event.group, mode: 'listen', speaker: event.speaker, newMessages: batch.map(message => ({ speaker: message.speaker, text: message.text })), participants: [] };
-      for (const member of await directory.members(event.group)) {
-        const profile = await memories.get(`group:${event.group}:${member.qq}`);
-        context.group.participants.push({ ...member, creator: member.qq === config.creator.qq, facts: memoryContext(profile).facts, automatic: profile.automatic });
+    const imageInput = await imageLoader(config, batch);
+    try {
+      const previous = await history(chatKey, limit);
+      const incoming = batch.map(message => ({ role: 'user', content: event.listening ? JSON.stringify({ speaker: message.speaker, text: message.text, time: message.time, mentionedAssistant: message.mentioned, segmentTypes: message.segmentTypes }) : message.text }));
+      const input = [...previous, ...incoming].slice(-limit - 1);
+      const state = await memories.get(key);
+      const settings = await memories.get(settingsKey);
+      const voiceMode = { 自动: 'auto', 按需: 'requested', 关闭: 'off' }[settings.voiceMode] || 'auto';
+      const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant, capabilities: capabilities(event, voiceMode) };
+      context.imageAttachments = imageInput.attachments;
+      if (imageInput.attachments.length) await audit({ kind: 'image-input', user: event.user, group: event.group, received: imageInput.attachments.length, attached: imageInput.paths.length });
+      if (event.listening) {
+        context.persona = (await memories.get(settingsKey)).persona;
+        context.group = { id: event.group, mode: 'listen', speaker: event.speaker, newMessages: batch.map(message => ({ speaker: message.speaker, text: message.text })), participants: [] };
+        for (const member of await directory.members(event.group)) {
+          const profile = await memories.get(`group:${event.group}:${member.qq}`);
+          context.group.participants.push({ ...member, creator: member.qq === config.creator.qq, facts: memoryContext(profile).facts, automatic: profile.automatic });
+        }
       }
-    }
-    // Retain every accepted group message, even when the model stays silent/fails.
-    if (event.listening) await save(chatKey, input.slice(-limit));
-    const response = await model(config, input, context);
-    let output = typeof response === 'string' ? { reply: response, memories: [], task: null } : response;
-    if (!output || typeof output.reply !== 'string' || (event.listening && typeof output.shouldReply !== 'boolean') || (!(event.listening && output.shouldReply === false) && !output.reply.trim())) throw new Error('Invalid reply');
-    if (output.action && isReadAction(validateAction(output.action)) && context.capabilities.social) {
-      try {
-        const action = validateAction(output.action), data = await socialRead(config, action);
-        await audit({ kind: 'social-read', user: event.user, action: action.type });
-        const followup = await model(config, input, { ...context, automatic: false, workEnabled: false, capabilities: { ...context.capabilities, social: false, music: false }, toolResult: { type: action.type, data } });
-        output = { ...followup, action: null, task: null, memories: [] };
-        if (typeof output.reply !== 'string' || !output.reply.trim()) throw new Error('Empty read summary');
-      } catch { logger.error('social_read_failed'); output = { shouldReply: true, reply: 'QQ空间读取未成功，没有取得可用内容。', memories: [], task: null, action: null }; }
-    }
-    const entries = Array.isArray(output.memories) ? output.memories.slice(0, 3) : [];
-    const changed = [];
-    if (event.listening) {
-      const speakers = new Set(batch.map(message => message.user));
-      const bySpeaker = new Map();
-      for (const entry of entries) {
-        const subject = entry?.subject ?? event.user;
-        if (!speakers.has(subject)) continue;
-        if (!bySpeaker.has(subject)) bySpeaker.set(subject, []);
-        bySpeaker.get(subject).push(entry);
+      // Retain every accepted group message, even when the model stays silent/fails.
+      if (event.listening) await save(chatKey, input.slice(-limit));
+      if (imageInput.attachments.length && !imageInput.paths.length && batch.every(message => message.text === '[收到图片]')) return config.backend === 'codex' ? '这次图片未能读取。请重发静态PNG、JPEG或WebP图片（每张不超过8MB，一条最多3张），也可以附上想问的问题。' : '当前API后端未接入图片理解，请管理员启用Codex图片后端。';
+      const response = await model(config, input, context, { images: imageInput.paths });
+      let output = typeof response === 'string' ? { reply: response, memories: [], task: null } : response;
+      if (!output || typeof output.reply !== 'string' || (event.listening && typeof output.shouldReply !== 'boolean') || (!(event.listening && output.shouldReply === false) && !output.reply.trim())) throw new Error('Invalid reply');
+      if (output.action && isReadAction(validateAction(output.action)) && context.capabilities.social) {
+        try {
+          const action = validateAction(output.action), data = await socialRead(config, action);
+          await audit({ kind: 'social-read', user: event.user, action: action.type });
+          const followup = await model(config, input, { ...context, automatic: false, workEnabled: false, capabilities: { ...context.capabilities, social: false, music: false }, toolResult: { type: action.type, data } }, { images: imageInput.paths });
+          output = { ...followup, action: null, task: null, memories: [] };
+          if (typeof output.reply !== 'string' || !output.reply.trim()) throw new Error('Empty read summary');
+        } catch { logger.error('social_read_failed'); output = { shouldReply: true, reply: 'QQ空间读取未成功，没有取得可用内容。', memories: [], task: null, action: null }; }
       }
-      for (const [subject, facts] of bySpeaker) changed.push(...await memories.remember(`group:${event.group}:${subject}`, facts));
-    } else changed.push(...await memories.remember(key, entries));
-    if (event.listening && output.shouldReply === false) {
-      await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: false, memories: changed.length });
-      return null;
-    }
-    let answer = output.reply;
-    if (output.action && !isReadAction(output.action)) answer += `\n\n${proposeSocial(event, output.action)}`;
-    if (output.task && canWork && controller && typeof output.task.prompt === 'string' && output.task.prompt.trim() && output.task.prompt.length <= 8000 && typeof output.task.summary === 'string' && output.task.summary.trim() && output.task.summary.length <= 500) {
-      answer += `\n\n${propose(key, { ...output.task, kind: 'codex' })}`;
-    }
-    if (changed.length && !event.listening) answer += `\n\n[记忆已更新：${changed.map(f => f.id).join('、')}，可用 /记忆 查看]`;
-    await save(chatKey, [...input, { role: 'assistant', content: output.reply }].slice(-limit));
-    if (event.listening) await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: true, memories: changed.length });
-    if (config.voice?.enabled && voiceMode !== 'off' && output.voice?.enabled && Array.from(output.reply).length <= (config.voice.maxCharacters || 600) && !output.action && !output.task) return { text: answer, speech: { text: output.reply, style: output.voice.style || '', explicit: false } };
-    return answer;
+      const entries = Array.isArray(output.memories) ? output.memories.slice(0, 3) : [];
+      const changed = [];
+      if (event.listening) {
+        const speakers = new Set(batch.map(message => message.user));
+        const bySpeaker = new Map();
+        for (const entry of entries) {
+          const subject = entry?.subject ?? event.user;
+          if (!speakers.has(subject)) continue;
+          if (!bySpeaker.has(subject)) bySpeaker.set(subject, []);
+          bySpeaker.get(subject).push(entry);
+        }
+        for (const [subject, facts] of bySpeaker) changed.push(...await memories.remember(`group:${event.group}:${subject}`, facts));
+      } else changed.push(...await memories.remember(key, entries));
+      if (event.listening && output.shouldReply === false) {
+        await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: false, memories: changed.length });
+        return null;
+      }
+      let answer = output.reply;
+      if (output.action && !isReadAction(output.action)) answer += `\n\n${proposeSocial(event, output.action)}`;
+      if (output.task && canWork && controller && typeof output.task.prompt === 'string' && output.task.prompt.trim() && output.task.prompt.length <= 8000 && typeof output.task.summary === 'string' && output.task.summary.trim() && output.task.summary.length <= 500) {
+        answer += `\n\n${propose(key, { ...output.task, kind: 'codex' })}`;
+      }
+      if (changed.length && !event.listening) answer += `\n\n[记忆已更新：${changed.map(f => f.id).join('、')}，可用 /记忆 查看]`;
+      await save(chatKey, [...input, { role: 'assistant', content: output.reply }].slice(-limit));
+      if (event.listening) await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: true, memories: changed.length });
+      if (config.voice?.enabled && voiceMode !== 'off' && output.voice?.enabled && Array.from(output.reply).length <= (config.voice.maxCharacters || 600) && !output.action && !output.task) return { text: answer, speech: { text: output.reply, style: output.voice.style || '', explicit: false } };
+      return answer;
+    } finally { await imageInput.cleanup(); }
   }
   function enqueue(event) {
     const queueKey = event.conversationKey;
@@ -396,7 +405,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       const current = batch.at(-1);
       if (batchable) current.batch = batch;
       try { const answer = await handle(current); if (answer !== null) await reply(current, answer); }
-      catch { logger.error('message_failed'); if (!current.listening || batch.some(message => message.mentioned) || current.text.startsWith('/')) await reply(current, '处理失败，请管理员检查模型、OneBot与服务日志；本条不会自动重试。').catch(() => logger.error('reply_failed')); }
+      catch { logger.error('message_failed'); if (!current.listening || batch.some(message => message.mentioned || message.imageRefs?.length) || current.text.startsWith('/')) await reply(current, '处理失败，请管理员检查模型、OneBot与服务日志；本条不会自动重试。').catch(() => logger.error('reply_failed')); }
     }).finally(() => { jobs -= batch.length; if (chains.get(queueKey) === job) chains.delete(queueKey); });
     chains.set(queueKey, job);
   }
@@ -416,7 +425,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       }
       if (req.method === 'GET' && path === '/api/status') {
         if (!equal(req.headers.authorization, `Bearer ${config.adminToken}`)) throw httpError(401);
-        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), uptimeSeconds: Math.floor(process.uptime()) });
+        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), imageEnabled: config.backend === 'codex', uptimeSeconds: Math.floor(process.uptime()) });
       }
       if (req.method !== 'POST' || path !== '/api/onebot/event') throw httpError(404);
       if (stopping || jobs >= 32) throw httpError(503);

@@ -60,3 +60,18 @@ test('voice sends original text then audio; social actions require scoped one-us
   await post('看看空间');assert.equal(writes.length,1);assert.equal(sent.at(-1).message[0].data.text,'读取了空间文字。');assert.ok(calls.at(-1).toolResult);assert.equal(calls.at(-1).capabilities.social,false);
   await post('/唱歌 测试歌词');assert.match(sent.at(-1).message[0].data.text,/尚未配置/);
 });
+
+test('personal posts fall back only to a confirmed native empty page and do not hide unknown errors', async () => {
+  const config={onebotUrl:'http://127.0.0.1:3000',onebotToken:'test-only'};
+  const calls=[];let valid=true;
+  const fetcher=async(_,options)=>{
+    const body=JSON.parse(options.body);calls.push(body);
+    if(!body.format)return new Response(JSON.stringify({status:'failed',retcode:200,data:null}));
+    return new Response(JSON.stringify({status:'ok',retcode:0,data:valid?{msglist:[],has_more:false,seal_off_memory:'opaque-private-data'}:{msglist:[{}],has_more:false}}));
+  };
+  const result=await readSocial(config,{type:'qzone_posts',target:'10001'},{fetcher});
+  assert.deepEqual(calls,[{target_uin:'10001',pos:0,num:5},{target_uin:'10001',format:'native'}]);
+  assert.deepEqual(result,{items:[],hasMore:false});
+  assert.doesNotMatch(JSON.stringify(result),/opaque/);
+  valid=false;await assert.rejects(readSocial(config,{type:'qzone_posts'},{fetcher}));
+});

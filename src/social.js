@@ -43,7 +43,17 @@ export function summarizeSocial(type, data) {
 export async function readSocial(config, input, options = {}) {
   const action = validateAction(input); let result;
   if (action.type === 'qzone_feed') result = await onebot(config, 'get_qzone_feeds', { page_num: 1, count: 5 }, options);
-  else if (action.type === 'qzone_posts') result = await onebot(config, 'get_qzone_msg_list', { ...(action.target ? { target_uin: action.target } : {}), pos: 0, num: 5 }, options);
+  else if (action.type === 'qzone_posts') {
+    const target = action.target ? { target_uin: action.target } : {};
+    try { result = await onebot(config, 'get_qzone_msg_list', { ...target, pos: 0, num: 5 }, options); }
+    catch (error) {
+      // NapCat's SL adapter can reject accounts with no posts. Accept only a
+      // positively confirmed native empty page; never turn unknown errors into "empty".
+      const native = await onebot(config, 'get_qzone_msg_list', { ...target, format: 'native' }, options);
+      if (!Array.isArray(native?.msglist) || native.msglist.length !== 0 || native.has_more !== false) throw error;
+      result = native;
+    }
+  }
   else if (action.type === 'qzone_detail') result = await onebot(config, 'get_qzone_msg_detail', { tid: action.postId, ...(action.target ? { target_uin: action.target } : {}), pos: 0, num: 5 }, options);
   else if (action.type === 'qzone_profile') result = await onebot(config, 'get_qzone_profile', action.target ? { target_uin: action.target } : {}, options);
   else throw new Error('Not a read action');
