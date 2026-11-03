@@ -12,6 +12,7 @@ def manual_reason(error):
     value=str(error).lower()
     if any(x in value for x in ['captcha','验证码']):return 'captcha_required'
     if any(x in value for x in ['new device','新设备','device verification']):return 'device_verification_required'
+    if any(x in value for x in ['安全风险','恢复账号使用','account restricted','servererrorcode":168']):return 'account_restricted'
     return None
 
 class QQBackend:
@@ -86,6 +87,7 @@ class Watchdog:
     def run(self,previous,now,force=False,check_only=False):
         state={**previous,'checkedAt':stamp(now),'account':self.backend.account,'online':False,'needsHuman':False}
         def finish(status,reason=None,action='none'):
+            if reason=='account_restricted':state['recoveryBlocked']=True
             state.update(status=status,reason=reason,action=action,online=status in ['online','recovered'],needsHuman=status in ['needs_human','wrong_account'])
             if state['online']:state['lastGoodAt']=stamp(now)
             self.save(state);return state
@@ -98,8 +100,11 @@ class Watchdog:
             return probe
         probe=self.backend.probe()
         if probe.get('wrongAccount'):return finish('wrong_account','unexpected_account')
-        if ready(probe):return finish('online')
+        if ready(probe):
+            state.pop('recoveryBlocked',None)
+            return finish('online')
         if probe.get('verification'):return finish('needs_human',probe['verification'])
+        if previous.get('recoveryBlocked'):return finish('needs_human','account_restricted','awaiting_user')
         if check_only:
             if previous.get('needsHuman'):return finish('needs_human',previous.get('reason'),'awaiting_user')
             return finish('offline','check_only')

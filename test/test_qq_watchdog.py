@@ -28,6 +28,15 @@ class Tests(unittest.TestCase):
     def test_verification_is_not_bypassed(self):
         backend=Backend([{'online':False}],secret='hash',password={'reason':'captcha_required'});state=module.Watchdog(backend).run({'lastRestartAt':99999},100000)
         self.assertEqual(state['reason'],'captcha_required');self.assertTrue(state['needsHuman']);self.assertEqual(backend.calls,['quick','password'])
+        self.assertEqual(module.manual_reason('登录失败：你的账号近期存在安全风险，请根据提示恢复账号使用'),'account_restricted')
+        restricted=Backend([{'online':False,'verification':'account_restricted'}],secret='hash')
+        blocked=module.Watchdog(restricted).run({},100000,check_only=True)
+        self.assertEqual(blocked['reason'],'account_restricted');self.assertTrue(blocked['needsHuman']);self.assertEqual(restricted.calls,[])
+        self.assertTrue(blocked['recoveryBlocked'])
+        later=Backend([{'online':False}]);held=module.Watchdog(later).run(blocked,200000,force=True)
+        self.assertEqual(held['reason'],'account_restricted');self.assertEqual(later.calls,[])
+        restored=module.Watchdog(Backend([{'online':True}])).run(held,200001)
+        self.assertTrue(restored['online']);self.assertNotIn('recoveryBlocked',restored)
     def test_repeated_recovery_is_throttled(self):
         backend=Backend([{'online':False}]);state=module.Watchdog(backend).run({'lastAutomaticRecoveryAt':99999},100000)
         self.assertEqual(state['reason'],'recovery_cooldown');self.assertEqual(backend.calls,[])
