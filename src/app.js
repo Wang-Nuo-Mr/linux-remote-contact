@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename, appendFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, writeFile, rename, appendFile, copyFile } from 'node:fs/promises';
+import { join, extname } from 'node:path';
 import { companion, work } from './model.js';
 import { loadTasks, runProcess } from './tasks.js';
 import { MemoryStore, memoryContext, safeMemory } from './memory.js';
@@ -12,6 +12,8 @@ import { SpeechService, MusicService, UsageBudget } from './media.js';
 import { onebot, isSocialOwner, validateAction, isReadAction, actionSummary, readSocial, writeSocial } from './social.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { imageReferences, prepareImages } from './images.js';
+import { ArtifactService, FileDelivery, artifactOwner, artifactFormats, artifactLabels, validateArtifact, artifactFailure } from './artifacts.js';
+import { InputStore, fileReferences } from './inputs.js';
 
 function equal(a, b) {
   return typeof a === 'string' && timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
@@ -36,10 +38,14 @@ function send(res, status, body) {
 }
 
 export function parseEvent(event, config) {
+  if (event.post_type === 'notice' && ['offline_file','group_upload'].includes(event.notice_type) && event.file && typeof event.file === 'object') {
+    event = { ...event, post_type:'message', message_type:event.notice_type === 'group_upload' ? 'group' : 'private', message_id:`file:${String(event.file.id || event.file.name || '').slice(0,150)}:${event.time}`, message:[{type:'file',data:event.file}] };
+  }
   const memberNotice = event.post_type === 'notice' && event.notice_type === 'group_increase';
   if (!memberNotice && (event.post_type !== 'message' || !['private', 'group'].includes(event.message_type))) return null;
   const type = memberNotice ? 'group' : event.message_type;
   if (!Number.isSafeInteger(Number(event.self_id)) || Number(event.self_id) <= 0) return null;
+  if (config.assistant?.qq && String(event.self_id) !== config.assistant.qq) return null;
   const user = String(event.user_id || ''), group = String(event.group_id || '');
   if (String(event.self_id) === user) return null;
   if (!Number.isSafeInteger(Number(event.user_id)) || Number(event.user_id) <= 0) return null;
@@ -57,18 +63,20 @@ export function parseEvent(event, config) {
   const segmentTypes = [...new Set(event.message.filter(s => s.type !== 'text').map(s => String(s.type).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32)).filter(Boolean))].slice(0, 10);
   let text = event.message.filter(s => s.type === 'text').map(s => String(s.data?.text || '')).join('').trim();
   const imageRefs = imageReferences(event.message);
+  const fileRefs = fileReferences(event.message);
   if (!text && imageRefs.length) text = '[收到图片]';
+  if (!text && fileRefs.length) text = '[收到文件]';
   if (!text && policy && segmentTypes.length) text = `[非文本消息：${segmentTypes.join('、')}；未解析内容]`;
   if (!text || text.length > 8000 || event.message_id === undefined) return null;
   // Reject stale/future signed events to bound replay window.
   if (!Number.isFinite(event.time) || Math.abs(Date.now() / 1000 - event.time) > 300) return null;
   // Shared conversation/queue; permissions, profiles and confirmations stay per sender.
-  return { key, user, group, text, type, imageRefs, id: `${event.self_id}:${key}:${event.message_id}`, listening: Boolean(policy), mentioned, segmentTypes,
+  return { key, user, group, text, type, imageRefs, fileRefs, id: `${event.self_id}:${key}:${event.message_id}`, listening: Boolean(policy), mentioned, segmentTypes,
     conversationKey: policy ? `group:${group}:shared` : key,
     speaker, time: event.time };
 }
 
-export async function createApp(config, { model = companion, worker = work, logger = console, speech, music, socialRead = readSocial, socialWrite = writeSocial, imageLoader = prepareImages } = {}) {
+export async function createApp(config, { model = companion, worker = work, logger = console, speech, music, socialRead = readSocial, socialWrite = writeSocial, imageLoader = prepareImages, artifacts, delivery, inputs } = {}) {
   await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   await mkdir(config.workspace, { recursive: true, mode: 0o700 });
   const tasks = config.enableTasks ? await loadTasks(config.tasksFile) : {};
@@ -79,6 +87,11 @@ export async function createApp(config, { model = companion, worker = work, logg
   music ||= new MusicService(config.music || { enabled: false }, budget);
   const lastVoice = new Map();
   const results = new Results(config.dataDir, config.workspace);
+  await results.recover();
+  artifacts ||= new ArtifactService(config, budget);
+  delivery ||= new FileDelivery(config, results);
+  inputs ||= new InputStore(config);
+  const artifactJobs = new Map();
   const sessions = new Map(), pending = new Map(), seen = new Map(), chains = new Map(), rates = new Map(), messageBatches = new Map();
   let jobs = 0, persist = Promise.resolve(), auditing = Promise.resolve(), stopping = false;
   const logPath = join(config.dataDir, 'audit.jsonl');
@@ -111,6 +124,10 @@ export async function createApp(config, { model = companion, worker = work, logg
     return operation;
   }
   async function reply(event, text) {
+    if(config.assistant?.qq){
+      const account=await onebot(config,'get_login_info',{}, {timeout:5000,limit:64000});
+      if(String(account?.user_id)!==config.assistant.qq)throw new Error('Unexpected QQ account; sending disabled');
+    }
     const envelope = typeof text === 'string' ? { text } : text;
     const chunks = splitReply(envelope.text);
     for (let index = 0; index < chunks.length; index++) {
@@ -146,7 +163,7 @@ export async function createApp(config, { model = companion, worker = work, logg
   }
   const canWork = config.backend === 'codex' && config.codexWork;
   function capabilities(event, voiceMode = 'auto') {
-    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, imageInput: config.backend === 'codex', textOnlyInputs: config.backend !== 'codex', crossChatSend: false, artifactDelivery: 'text-only' };
+    return { deployment: 'Ubuntu Linux QQ助手；Codex生成正文，程序负责验签、记忆和接口执行。操作记录与本次桌面配置聊天不会自动变成对话经历。', voice: { available: Boolean(config.voice?.enabled), mode: voiceMode, maxCharacters: config.voice?.maxCharacters || 600 }, music: Boolean(config.music?.enabled) && isSocialOwner(config, event), social: Boolean(config.socialEnabled) && isSocialOwner(config, event), socialPrivateOnly: true, imageInput: config.backend === 'codex', textOnlyInputs: config.backend !== 'codex', crossChatSend: Boolean(config.crossChatEnabled) && isSocialOwner(config,event), allowedSendGroups: isSocialOwner(config,event) ? [...config.allowedGroups] : [], artifactDelivery: config.fileDeliveryEnabled ? 'attachments' : 'text-only', artifacts: { available: artifactOwner(config,event), formats: artifactFormats.filter(x=>x!=='image'||config.imageGenerationEnabled), dailyLimit: config.dailyArtifacts || 20 }, inputFiles: artifactOwner(config,event) };
   }
   function formatRead(data) {
     if (data.items) return data.items.map((item, i) => `${i + 1}. ${item.nickname || item.qq || '动态'}${item.qq ? `（${item.qq}）` : ''}\n${item.text || '无可读取文字'}${item.imageCount ? `\n[含${item.imageCount}张图片，尚未识图]` : ''}${item.postId ? `\nTid：${item.postId}` : ''}`).join('\n\n') || '接口返回列表为空。';
@@ -155,8 +172,64 @@ export async function createApp(config, { model = companion, worker = work, logg
   function proposeSocial(event, input) {
     if (!isSocialOwner(config, event)) return 'QQ空间和资料操作请由创造者在私聊中发起。';
     const action = validateAction(input);
+    if (action.type === 'group_message') {
+      if (!config.crossChatEnabled || !config.allowedGroups.has(action.target)) return '目标群未授权。只能向已允许的群发送，不能凭群名猜测群号。';
+      return propose(event.key, { kind:'social', action, summary:actionSummary(action) });
+    }
     if (action.type === 'song' ? !config.music?.enabled : !config.socialEnabled) return action.type === 'song' ? '音乐服务尚未配置。百炼语音密钥用于说话；唱歌需要单独的音乐服务凭据。' : 'QQ空间和资料接口尚未启用。';
     return propose(event.key, { kind: 'social', action, summary: actionSummary(action) });
+  }
+  async function startArtifact(event, value, imagePaths = []) {
+    if (!artifactOwner(config,event)) return '制作工具目前仅由创造者发起。';
+    const request = validateArtifact(value);
+    if (request.format === 'image' && !config.imageGenerationEnabled) return '原生图像生成尚未启用。';
+    if (artifactJobs.size >= 3) return '已有3个制作任务排队或运行，请稍后再试；不会重复提交。';
+    let prior;
+    if (request.sourceId) {
+      try { prior=await results.get(event.key,request.sourceId);if(prior.status!=='completed'||prior.kind!=='artifact'||prior.format!==request.format)throw new Error(); }
+      catch { return '原作品不存在、不属于本会话、格式不符或尚未完成，不能据此修改。'; }
+    }
+    const result = await results.create(event.key,`${artifactLabels[request.format]}：${request.request.slice(0,180)}`);
+    Object.assign(result,{kind:'artifact',format:request.format,status:'queued',stage:'排队'});await results.put(result);
+    const copied = [];
+    if (imagePaths.length) {
+      const dir=join(result.cwd,'inputs');await mkdir(dir,{mode:0o700});
+      for (const [index,path] of imagePaths.entries()) { const target=join(dir,`reference-${index+1}${extname(path)}`);await copyFile(path,target);copied.push(target); }
+    }
+    const sources=await inputs.context(event.key);
+    if (prior) {
+      if (request.format === 'image') {
+        const file=await results.attachment(prior,prior.files[0],8*1024*1024);
+        const dir=join(result.cwd,'inputs');await mkdir(dir,{recursive:true,mode:0o700});
+        const target=join(dir,'previous'+extname(file.name));await writeFile(target,file.data,{mode:0o600});copied.unshift(target);
+      } else sources.push({id:prior.id,name:'上一版作品内容',text:(await readFile(join(prior.cwd,'.artifact-spec.json'),'utf8')).slice(0,60000)});
+    }
+    const destination={key:event.key,type:event.type,user:event.user,group:event.group,conversationKey:event.conversationKey};
+    await reply(event,`开始制作${artifactLabels[request.format]}。\n任务：${result.id}\n完成后直接在此会话发送文件；/进度 ${result.id} 可查看状态。`);
+    const job=Promise.resolve().then(async()=>{
+      try {
+        result.status='running';await results.put(result);
+        await audit({kind:'artifact-start',user:event.user,group:event.group,result:result.id,format:request.format});
+        const manifest=await artifacts.create(result,request,{sources,images:copied,onStage:async stage=>{result.stage=stage;await results.put(result);}});
+        // Resolve every manifest path before any upload; external/model paths cannot escape.
+        for(const name of [...manifest.files,...(manifest.preview?[manifest.preview]:[])]) await results.attachment(result,name,config.maxUploadBytes||20*1024*1024);
+        result.status='completed';result.stage='制作与校验完成';result.files=manifest.files;result.preview=manifest.preview||null;result.output=`已制作${artifactLabels[request.format]}${manifest.pages?`，${manifest.pages}页`:''}。`;
+        await results.put(result);
+        const sent=config.fileDeliveryEnabled?await delivery.send(destination,result,manifest.files,manifest.preview):{sent:[],failed:manifest.files};
+        result.delivery=sent;await results.put(result);
+        await audit({kind:'artifact-end',user:event.user,group:event.group,result:result.id,status:'completed',files:manifest.files.length,sent:sent.sent.length,failed:sent.failed.length});
+        await reply(destination,`${result.output}\n任务：${result.id}\n${manifest.files.join('\n')}\n${sent.failed.length?'部分文件的QQ接收未确认，文件已保留。':'QQ已接受发送文件。'}\n重新发送：/重发 ${result.id}`);
+      } catch (error) {
+        if (result.status === 'completed') {
+          result.stage='文件已生成，QQ回传未确认';await results.put(result);logger.error('artifact_delivery_failed');return;
+        }
+        const failure=artifactFailure(error);result.failedStage=result.stage;result.status='failed';result.stage=`${result.failedStage || '制作'}阶段未完成`;result.failureCode=failure.code;result.output=failure.text;
+        await results.put(result);await audit({kind:'artifact-end',user:event.user,group:event.group,result:result.id,status:'failed'});
+        logger.error('artifact_failed');
+        await reply(destination,`制作未完成，任务：${result.id}。\n${result.output}\n可以 /进度 ${result.id} 查看；原有文件和记忆保留。`).catch(()=>logger.error('reply_failed'));
+      }
+    }).catch(()=>logger.error('artifact_job_failed')).finally(()=>artifactJobs.delete(result.id));
+    artifactJobs.set(result.id,job);return null;
   }
   async function handle(event) {
     const { key, text } = event;
@@ -169,7 +242,69 @@ export async function createApp(config, { model = companion, worker = work, logg
     if (!controller && /^\/(?:干活|运行|确认|设定|重置|语音模式)(?:\s|$)/.test(text)) return `这项管理或执行操作仅由创造者${config.creator.name}的账号授权。`;
     const now = Date.now();
     for (const [token, item] of pending) if (item.expires <= now) pending.delete(token);
-    if (text === '/能力' || text === '/自身说明') return `我由${config.creator?.name || '管理员'}部署在Ubuntu服务器上，使用${config.backend}生成回复。\n语音：${config.voice?.enabled ? '已配置，文字和语音对应，可按语境调整语气' : '未配置'}\n音乐生成：${config.music?.enabled ? '已配置独立音乐服务' : '未配置，不能用语音API直接冒充唱歌'}\nQQ空间与资料：${config.socialEnabled ? '已启用；创造者私聊可读取，写入需确认' : '未启用'}\n${config.listeningGroups.size ? '指定群无需@，由我判断是否回答；' : ''}每个人的记忆独立，固定创造者身份保留。\n图片：${config.backend === 'codex' ? '支持当前消息的PNG、JPEG、WebP原图理解' : '当前后端未接入'}；语音输入尚未转写。\n我不自动知道桌面端完整部署过程。`;
+    if(text === '/运维状态') {
+      if(!isSocialOwner(config,event))return '运维状态仅向创造者私聊提供。';
+      if(!config.watchdogStatusFile)return 'QQ自动检查尚未配置。';
+      try {
+        const state=JSON.parse(await readFile(config.watchdogStatusFile,'utf8'));
+        const reason={captcha_required:'需要本人完成验证码',device_verification_required:'需要本人确认新设备',cached_login_expired_no_password:'缓存未恢复，尚未配置密码；需要扫码或填写私密密码文件',password_login_failed:'密码登录未成功，请人工核对',password_login_not_completed:'密码登录未完成，需人工检查',recovery_cooldown:'本日已尝试恢复，避免反复登录',unexpected_account:'在线账号与配置账号不一致，未自动改动'}[state.reason] || state.reason || '无';
+        return `QQ定时检查：每24小时一次\n上次检查：${state.checkedAt?new Date(state.checkedAt).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}):'尚未完成'}\n状态：${state.status || '未知'}\n原因：${reason}\n需要本人处理：${state.needsHuman?'是':'否'}`;
+      }catch{return '暂时无法读取QQ检查结果。';}
+    }
+    if (config.artifactsEnabled) {
+      const received=[];
+      for (const message of batch) for (const ref of message.fileRefs || []) {
+        if (message.user !== config.creator?.qq) continue;
+        try { const item=await inputs.receive(message,ref);received.push(`已接收 ${item.name}，文件编号：${item.id}${item.scanMayNeedOCR?'（扫描件，未提取到可读文字，暂不自动OCR）':''}`); }
+        catch { received.push('文件接收或提取未成功：支持10MB以内docx/pptx/xlsx/pdf/txt/md/csv/json；请检查类型、下载权限或是否加密。'); }
+      }
+      if (received.length) {
+        if (batch.every(message=>message.text === '[收到文件]')) return received.join('\n')+'\n可以继续说明希望如何分析或制作。/输入文件 查看，/忘记文件 编号 删除。';
+        await reply(event,received.join('\n'));
+      }
+    }
+    if (text === '/技能') return `制作工具：${config.artifactsEnabled?'Word/PPT/PDF/Excel/数据图/文本；创造者可直接提出制作要求':'未启用'}\nAI绘图：${config.imageGenerationEnabled?'Codex原生工具，支持当前附图参考；会消耗Codex额度':'未启用'}\n文件回传：${config.fileDeliveryEnabled?'已启用，完成后发回当前会话':'未启用'}\n/制作 docx|pptx|pdf|xlsx|image|chart|text 具体要求\n/作品 /进度 [任务号] /重发 任务号 [相对文件名]\n/输入文件 /忘记文件 文件号；输入10MB、输出${(config.maxUploadBytes||20971520)/1048576}MB，制作每日${config.dailyArtifacts||20}次、绘图每日${config.dailyImages||3}次。\n写入服务器或执行任意代码仍用/干活确认，唱歌未配置。`;
+    if (text === '/输入文件') {
+      if(!artifactOwner(config,event)) return '文件输入由创造者管理。';
+      return (await inputs.list(key)).map(x=>`${x.id}：${x.name}（${Math.ceil(x.size/1024)}KB）`).join('\n') || '本会话还没有输入文件。';
+    }
+    if (text.startsWith('/忘记文件 ')) {
+      if(!artifactOwner(config,event)) return '文件输入由创造者管理。';
+      try{await inputs.forget(key,text.slice(6).trim());return '输入文件及其提取文本已删除；已生成的作品保留。';}catch{return '文件编号不存在或不属于本会话。';}
+    }
+    if (text === '/作品' || text === '/进度' || text.startsWith('/进度 ')) {
+      const id=text.startsWith('/进度 ')?text.slice(4).trim():null;
+      try {
+        const items=id?[await results.get(key,id)]:await results.list(key);
+        return items.map(x=>`${x.id}：${x.status}${x.stage?' / '+x.stage:''}\n${x.summary}`).join('\n\n') || '本会话暂无制作或执行记录。';
+      }catch{return '任务编号不存在或不属于本会话。';}
+    }
+    const resend=text.match(/^\/(?:重发|发文件)\s+([a-f0-9]{24})(?:\s+([\s\S]+))?$/);
+    if(resend) {
+      if(!config.fileDeliveryEnabled) return '文件回传尚未启用。';
+      try {
+        const result=await results.get(key,resend[1]);
+        if(result.status!=='completed')return '任务尚未完成，请先查看/进度。';
+        const names=resend[2]?[resend[2].trim()]:result.files || await results.files(result);
+        const sent=await delivery.send(event,result,names,resend[2]?null:result.preview);
+        return `QQ已接受${sent.sent.length}个文件；${sent.failed.length}个未确认。${sent.failed.length?'请核对相对路径、大小和文件类型；不会自动重复发送。':''}`;
+      }catch{return '文件不可回传：请检查当前会话、任务编号、相对路径、类型及大小。';}
+    }
+    const make=text.match(/^\/制作\s+(\S+)\s+([\s\S]+)$/);
+    if(make) {
+      const format={word:'docx',文档:'docx',ppt:'pptx',演示:'pptx',excel:'xlsx',表格:'xlsx',图片:'image',绘图:'image',图表:'chart',文本:'text'}[make[1].toLowerCase()] || make[1].toLowerCase();
+      if(!artifactFormats.includes(format))return '支持：/制作 Word、PPT、PDF、Excel、图片、图表或文本 具体要求。';
+      const loaded=await imageLoader(config,batch);
+      try{return await startArtifact(event,{format,request:make[2]},loaded.paths);}finally{await loaded.cleanup();}
+    }
+    const revise=text.match(/^\/修改作品\s+([a-f0-9]{24})\s+([\s\S]+)$/);
+    if(revise) {
+      try{const previous=await results.get(key,revise[1]);return await startArtifact(event,{format:previous.format,request:revise[2],sourceId:previous.id});}
+      catch{return '未找到本会话可修改的作品。';}
+    }
+    const groupSend=text.match(/^\/发群消息\s+([1-9][0-9]{4,15})\s+([\s\S]+)$/);
+    if(groupSend) return proposeSocial(event,{type:'group_message',target:groupSend[1],content:groupSend[2]});
+    if (text === '/能力' || text === '/自身说明') return `制作与文件回传：${config.artifactsEnabled && config.fileDeliveryEnabled ? '已启用，发送 /技能 查看' : '未完整启用'}\n我由${config.creator?.name || '管理员'}部署在Ubuntu服务器上，使用${config.backend}生成回复。\n语音：${config.voice?.enabled ? '已配置，文字和语音对应，可按语境调整语气' : '未配置'}\n音乐生成：${config.music?.enabled ? '已配置独立音乐服务' : '未配置，不能用语音API直接冒充唱歌'}\nQQ空间与资料：${config.socialEnabled ? '已启用；创造者私聊可读取，写入需确认' : '未启用'}\n${config.listeningGroups.size ? '指定群无需@，由我判断是否回答；' : ''}每个人的记忆独立，固定创造者身份保留。\n图片：${config.backend === 'codex' ? '支持当前消息的PNG、JPEG、WebP原图理解' : '当前后端未接入'}；语音输入尚未转写。\n我不自动知道桌面端完整部署过程。`;
     if (text === '/声线') return config.voice?.enabled ? `已配置固定音色，模型：${config.voice.model}。\n/语音 内容：直接朗读\n/语音模式 自动、按需、关闭：切换当前会话的语音方式。` : '百炼声线尚未配置完成。';
     if (text.startsWith('/语音模式 ')) {
       const mode = text.slice(6).trim();
@@ -197,7 +332,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       const [style, ...lyrics] = text.slice(4).split('|');
       return proposeSocial(event, { type: 'song', style: lyrics.length ? style.trim() : '温柔清新的短歌', content: lyrics.length ? lyrics.join('|').trim() : style.trim() });
     }
-    if (text === '/帮助' || text === '/help') return `/状态 /能力 /重置 /记忆 /认识 /新成员 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/声线 /语音 内容 /语音模式 自动或按需或关闭\n创造者私聊：/空间动态 /空间说说 [QQ号] /空间资料 [QQ号] /空间详情 Tid [QQ号]\n/发动态 完整正文 /昵称 内容 /签名 内容 /头像 HTTPS图片地址 /唱歌 曲风|原创歌词\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n${event.listening ? '本群无需@，由Codex判断是否开口。个人记忆按QQ号区分，任务与群管理仅创造者可操作。' : '普通文字直接聊天，普通群聊需要@机器人。记忆按会话隔离。'}`;
+    if (text === '/帮助' || text === '/help') return `/状态 /能力 /重置 /记忆 /认识 /新成员 /记住 内容 /纠正 编号 内容 /忘记 编号 /清空记忆 /设定 内容 /自动记忆 开或关\n/声线 /语音 内容 /语音模式 自动或按需或关闭\n创造者私聊：/空间动态 /空间说说 [QQ号] /空间资料 [QQ号] /空间详情 Tid [QQ号]\n/发动态 完整正文 /昵称 内容 /签名 内容 /头像 HTTPS图片地址 /唱歌 曲风|原创歌词\n/技能 /制作 格式 要求 /作品 /进度 [编号] /重发 编号 [文件名] /修改作品 编号 要求 /输入文件 /忘记文件 编号\n/发群消息 群号 正文\n/干活 任务描述 /结果 编号 /文件 编号 相对路径 /取消\n/任务 /运行 任务名 /确认 确认码\n${event.listening ? '本群无需@，由Codex判断是否开口。个人记忆按QQ号区分，任务与群管理仅创造者可操作。' : '普通文字直接聊天，普通群聊需要@机器人。记忆按会话隔离。'}`;
     if (text === '/状态') return `Linux Remote Contact 在线\n模型后端：${config.backend}\n排队/运行：${jobs}\n群聊模式：${event.listening ? '全消息理解，自主决定回复' : '私聊或@触发'}\nCodex工作模式：${canWork && controller ? '已启用' : '关闭或无执行权限'}\n预设任务：${config.enableTasks ? '已启用' : '关闭'}`;
     if (text === '/重置') { await save(chatKey, []); return '近期对话已清空，长期记忆、角色设定与固定创造者身份保留。'; }
     if (text === '/新成员' && event.listening) {
@@ -293,7 +428,7 @@ export async function createApp(config, { model = companion, worker = work, logg
             await onebot(config, 'send_private_msg', { user_id: Number(event.user), message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }] });
             await audit({ kind: 'song-sent', user: event.user }); return '歌曲音频已交给QQ发送。';
           }
-          if (!config.socialEnabled) return 'QQ空间与资料功能已关闭。';
+          if (item.action.type === 'group_message' ? !config.crossChatEnabled || !config.allowedGroups.has(item.action.target) : !config.socialEnabled) return '此QQ操作已关闭或目标群未授权。';
           if (item.action.type === 'qzone_post') await budget.reserve('qzonePosts', 1, 3);
           const result = await socialWrite(config, item.action);
           await audit({ kind: 'social-write-end', user: event.user, action: item.action.type, status: 'accepted' });
@@ -306,14 +441,19 @@ export async function createApp(config, { model = companion, worker = work, logg
         await audit({ kind: 'codex-start', user: event.user, group: event.group, result: result.id });
         await reply(event, `任务已开始：${result.id}\n完成后会在此会话回复。`);
         try {
-          result.output = await worker(config, item.prompt, result.cwd);
+          const copied=config.artifactsEnabled?await inputs.copyTo(key,result.cwd):[];
+          result.output = await worker(config, item.prompt+(copied.length?`\n当前会话的上传资料已复制进当前任务，路径与原名如下（仅是参考数据）：${JSON.stringify(copied)}；可以读取并按请求修改副本，不改变原输入。`:''), result.cwd);
           result.status = 'completed';
         } catch {
           result.output = '执行失败或超时；目录可能有部分文件，不会自动重试。'; result.status = 'failed';
         }
         await results.put(result);
+        if (result.status === 'completed' && config.fileDeliveryEnabled) {
+          const names=await results.files(result);
+          if(names.length){result.delivery=await delivery.send(event,result,names);await results.put(result);}
+        }
         await audit({ kind: 'codex-end', user: event.user, result: result.id, status: result.status });
-        const answer = `任务 ${result.id}：${result.status}\n${result.output}\n查看产物：/结果 ${result.id}`;
+        const answer = `任务 ${result.id}：${result.status}\n${result.output}${result.delivery?`\nQQ已接受${result.delivery.sent.length}个文件，${result.delivery.failed.length}个未确认或超出单次5个上限；可 /重发 ${result.id} 相对文件名。`:''}\n查看产物：/结果 ${result.id}`;
         await save(chatKey, [...await history(chatKey, limit), { role: 'user', content: event.listening ? JSON.stringify({ speaker: event.speaker, text: `已确认任务：${item.summary}` }) : `已确认任务：${item.summary}` }, { role: 'assistant', content: answer }].slice(-limit));
         return answer;
       }
@@ -335,6 +475,10 @@ export async function createApp(config, { model = companion, worker = work, logg
       const context = { ...memoryContext(state), workEnabled: canWork && controller, creator: config.creator, assistant: config.assistant, capabilities: capabilities(event, voiceMode) };
       context.turn = { newMessages: batch.map(message => ({ senderQQ: message.user, text: message.text, time: message.time })) };
       context.imageAttachments = imageInput.attachments;
+      if(artifactOwner(config,event)) {
+        context.inputFiles=await inputs.context(key);
+        context.recentArtifacts=(await results.list(key,5)).map(x=>({id:x.id,status:x.status,format:x.format,summary:x.summary,files:x.files||[]}));
+      }
       if (imageInput.attachments.length) await audit({ kind: 'image-input', user: event.user, group: event.group, received: imageInput.attachments.length, attached: imageInput.paths.length });
       if (event.listening) {
         context.persona = (await memories.get(settingsKey)).persona;
@@ -355,7 +499,7 @@ export async function createApp(config, { model = companion, worker = work, logg
           const action = validateAction(output.action), data = await socialRead(config, action);
           await audit({ kind: 'social-read', user: event.user, action: action.type });
           const followup = await model(config, input, { ...context, automatic: false, workEnabled: false, capabilities: { ...context.capabilities, social: false, music: false }, toolResult: { type: action.type, data } }, { images: imageInput.paths });
-          output = { ...followup, action: null, task: null, memories: [] };
+          output = { ...followup, action: null, task: null, artifact:null, fileAction:null, memories: [] };
           if (typeof output.reply !== 'string' || !output.reply.trim()) throw new Error('Empty read summary');
         } catch { logger.error('social_read_failed'); output = { shouldReply: true, reply: 'QQ空间读取未成功，没有取得可用内容。', memories: [], task: null, action: null }; }
       }
@@ -375,6 +519,26 @@ export async function createApp(config, { model = companion, worker = work, logg
       if (event.listening && output.shouldReply === false) {
         await audit({ kind: 'group-decision', group: event.group, user: event.user, users: [...new Set(batch.map(message => message.user))], messages: batch.length, replied: false, memories: changed.length });
         return null;
+      }
+      if (output.artifact) {
+        if(!artifactOwner(config,event)) return '制作文件目前仅由创造者发起。';
+        await save(chatKey,[...input,{role:'assistant',content:'已接收制作请求，结果由制作任务单独回传。'}].slice(-limit));
+        return await startArtifact(event,output.artifact,imageInput.paths);
+      }
+      if (output.fileAction) {
+        if(!artifactOwner(config,event))return '作品操作目前仅由创造者发起。';
+        const operation=output.fileAction;
+        try {
+          const all=await results.list(key);
+          const result=operation.resultId?await results.get(key,operation.resultId):all.find(x=>operation.type!=='resend'||x.status==='completed');
+          if(operation.type==='list')return all.map(x=>`${x.id}：${x.status}\n${x.summary}`).join('\n\n') || '本会话暂无作品。';
+          if(!result)return '本会话没有符合条件的作品。';
+          if(operation.type==='status')return `${result.id}：${result.status}${result.stage?' / '+result.stage:''}\n${result.summary}`;
+          if(!config.fileDeliveryEnabled||result.status!=='completed')return '该作品尚未完成或文件回传未启用。';
+          const names=operation.name?[operation.name]:result.files||await results.files(result);
+          const sent=await delivery.send(event,result,names,operation.name?null:result.preview);
+          return `本次重发QQ已接受${sent.sent.length}个文件，${sent.failed.length}个未确认或超出单次5个上限。任务：${result.id}`;
+        }catch{return '作品不可访问，请核对本会话的任务编号及文件路径。';}
       }
       let answer = output.reply;
       if (output.action && !isReadAction(output.action)) answer += `\n\n${proposeSocial(event, output.action)}`;
@@ -444,7 +608,7 @@ export async function createApp(config, { model = companion, worker = work, logg
       }
       if (req.method === 'GET' && path === '/api/status') {
         if (!equal(req.headers.authorization, `Bearer ${config.adminToken}`)) throw httpError(401);
-        return send(res, 200, { ok: true, backend: config.backend, jobs, tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), imageEnabled: config.backend === 'codex', receiveDelay: { privateMs: config.privateDebounce ?? 3000, groupMs: config.groupDebounce ?? 4000, maxWaitMs: config.maxBatchWait ?? 12000 }, uptimeSeconds: Math.floor(process.uptime()) });
+        return send(res, 200, { ok: true, backend: config.backend, jobs: jobs + artifactJobs.size, artifactJobs: artifactJobs.size, artifactsEnabled: Boolean(config.artifactsEnabled), fileDeliveryEnabled: Boolean(config.fileDeliveryEnabled), imageGenerationEnabled: Boolean(config.imageGenerationEnabled), crossChatEnabled: Boolean(config.crossChatEnabled), tasksEnabled: config.enableTasks, tasks: Object.keys(tasks), allowedUsers: config.allowedUsers.size, allowedGroups: config.allowedGroups.size, listeningGroups: config.listeningGroups.size, voiceEnabled: Boolean(config.voice?.enabled), musicEnabled: Boolean(config.music?.enabled), socialEnabled: Boolean(config.socialEnabled), imageEnabled: config.backend === 'codex', receiveDelay: { privateMs: config.privateDebounce ?? 3000, groupMs: config.groupDebounce ?? 4000, maxWaitMs: config.maxBatchWait ?? 12000 }, uptimeSeconds: Math.floor(process.uptime()) });
       }
       if (req.method !== 'POST' || path !== '/api/onebot/event') throw httpError(404);
       if (stopping || jobs >= 32) throw httpError(503);
@@ -474,7 +638,7 @@ export async function createApp(config, { model = companion, worker = work, logg
   server.headersTimeout = 10000;
   return {
     server,
-    async idle() { await Promise.all(chains.values()); await persist; await auditing; },
+    async idle() { await Promise.all(chains.values()); await Promise.all(artifactJobs.values()); await persist; await auditing; },
     async close() {
       stopping = true;
       for (const entry of messageBatches.values()) { entry.sealed = true; entry.wake?.(); }

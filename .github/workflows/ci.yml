@@ -12,4 +12,6 @@ jobs:
           node-version: '24'
       - run: npm run check
       - run: npm test
+      - run: python3 -m py_compile tools/artifacts/render.py tools/qq_watchdog.py tools/install_qq_secret.py
+      - run: python3 -m unittest discover -s test -p test_qq_watchdog.py
       - run: docker build -t linux-remote-contact:test .

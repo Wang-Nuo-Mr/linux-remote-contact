@@ -6,6 +6,8 @@ workspace/
 node_modules/
 *.log
 coverage/
+__pycache__/
+*.pyc
 config/identity.local.json
 config/voice.local.json
 config/music.local.json

@@ -1,0 +1,22 @@
+[Unit]
+Description=Xiaoruo QQ online check and bounded recovery
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /usr/local/lib/linux-contact/qq_watchdog.py
+TimeoutStartSec=600
+UMask=0027
+RuntimeDirectory=linux-contact-qq-watchdog
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/linux-contact/qq-watchdog
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Xiaoruo QQ session every 24 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+AccuracySec=1min
+RandomizedDelaySec=30s
+Unit=qq-watchdog.service
+
+[Install]
+WantedBy=timers.target

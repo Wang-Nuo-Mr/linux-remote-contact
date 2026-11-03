@@ -51,5 +51,16 @@ export function loadConfig(env = process.env) {
     voice: loadMediaConfig(env.TTS_CONFIG_FILE, 'voice'),
     music: loadMediaConfig(env.MUSIC_CONFIG_FILE, 'music'),
     socialEnabled: env.ENABLE_QQ_SOCIAL === 'true',
+    artifactsEnabled: env.ENABLE_ARTIFACTS === 'true' && backend === 'codex',
+    imageGenerationEnabled: env.ENABLE_IMAGE_GENERATION === 'true' && backend === 'codex',
+    fileDeliveryEnabled: env.ENABLE_FILE_DELIVERY === 'true',
+    crossChatEnabled: env.ENABLE_CROSS_CHAT_SEND === 'true',
+    artifactPython: env.ARTIFACT_PYTHON || 'python3',
+    artifactRenderer: env.ARTIFACT_RENDERER || '',
+    dailyArtifacts: number('DAILY_ARTIFACTS', 20, 1, 100),
+    dailyImages: number('DAILY_IMAGES', 3, 1, 20),
+    imageTimeout: number('IMAGE_TIMEOUT_MS', 600000, 30000, 900000),
+    maxUploadBytes: number('MAX_UPLOAD_MB', 20, 1, 50) * 1024 * 1024,
+    watchdogStatusFile: env.QQ_WATCHDOG_STATUS_FILE || '',
   };
 }

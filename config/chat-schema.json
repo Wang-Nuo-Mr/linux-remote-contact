@@ -1,46 +1,216 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["shouldReply", "reply", "memories", "task", "voice", "action"],
+  "required": [
+    "shouldReply",
+    "reply",
+    "memories",
+    "task",
+    "voice",
+    "action",
+    "artifact",
+    "fileAction"
+  ],
   "properties": {
     "voice": {
       "anyOf": [
-        { "type": "null" },
-        { "type": "object", "additionalProperties": false, "required": ["enabled", "style"], "properties": { "enabled": { "type": "boolean" }, "style": { "type": "string" } } }
-      ]
-    },
-    "action": {
-      "anyOf": [
-        { "type": "null" },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["type", "target", "content", "style", "postId"],
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "style"
+          ],
           "properties": {
-            "type": { "type": "string", "enum": ["qzone_feed", "qzone_posts", "qzone_detail", "qzone_profile", "qzone_post", "nickname", "signature", "avatar", "song"] },
-            "target": { "type": "string" }, "content": { "type": "string" }, "style": { "type": "string" }, "postId": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "style": {
+              "type": "string"
+            }
           }
         }
       ]
     },
-    "shouldReply": { "type": "boolean" },
-    "reply": { "type": "string" },
+    "action": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "target",
+            "content",
+            "style",
+            "postId"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "qzone_feed",
+                "qzone_posts",
+                "qzone_detail",
+                "qzone_profile",
+                "qzone_post",
+                "nickname",
+                "signature",
+                "avatar",
+                "song",
+                "group_message"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "style": {
+              "type": "string"
+            },
+            "postId": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "shouldReply": {
+      "type": "boolean"
+    },
+    "reply": {
+      "type": "string"
+    },
     "memories": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["subject", "label", "text"],
-        "properties": { "subject": { "type": ["string", "null"] }, "label": { "type": "string" }, "text": { "type": "string" } }
+        "required": [
+          "subject",
+          "label",
+          "text"
+        ],
+        "properties": {
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
       }
     },
     "task": {
       "anyOf": [
-        { "type": "null" },
+        {
+          "type": "null"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["summary", "prompt"],
-          "properties": { "summary": { "type": "string" }, "prompt": { "type": "string" } }
+          "required": [
+            "summary",
+            "prompt"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "format",
+            "request",
+            "sourceId"
+          ],
+          "properties": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "docx",
+                "pptx",
+                "pdf",
+                "xlsx",
+                "image",
+                "chart",
+                "text"
+              ]
+            },
+            "request": {
+              "type": "string"
+            },
+            "sourceId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "fileAction": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "resultId",
+            "name"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "status",
+                "list",
+                "resend"
+              ]
+            },
+            "resultId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
         }
       ]
     }

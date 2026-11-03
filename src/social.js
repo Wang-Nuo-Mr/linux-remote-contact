@@ -2,12 +2,20 @@ import { jsonRequest, limitedBody } from './media.js';
 import { containsSensitive } from './memory.js';
 
 export async function onebot(config, action, params, options = {}) {
+  if (config.assistant?.qq && !['get_login_info', 'get_status'].includes(action)) {
+    const account = await jsonRequest(`${config.onebotUrl}/get_login_info`, {}, config.onebotToken, {
+      timeout: 5000, limit: 64000, ...(options.fetcher ? { fetcher: options.fetcher } : {})
+    });
+    if (account.status !== 'ok' || account.retcode !== 0 || String(account.data?.user_id) !== config.assistant.qq) {
+      throw new Error('Unexpected QQ account; operation disabled');
+    }
+  }
   const data = await jsonRequest(`${config.onebotUrl}/${action}`, params, config.onebotToken, { timeout: 30000, limit: 2000000, ...options });
   if (data.status !== 'ok' || data.retcode !== 0) throw new Error('QQ interface rejected request');
   if (typeof data.data?.result === 'number' && data.data.result !== 0) throw new Error('QQ operation returned an error');
   return data.data;
 }
-const kinds = new Set(['qzone_feed', 'qzone_posts', 'qzone_detail', 'qzone_profile', 'qzone_post', 'nickname', 'signature', 'avatar', 'song']);
+const kinds = new Set(['qzone_feed', 'qzone_posts', 'qzone_detail', 'qzone_profile', 'qzone_post', 'nickname', 'signature', 'avatar', 'song', 'group_message']);
 const reads = new Set(['qzone_feed', 'qzone_posts', 'qzone_detail', 'qzone_profile']);
 const id = value => typeof value === 'string' && /^[1-9][0-9]{4,15}$/.test(value) && Number.isSafeInteger(Number(value));
 export function validateAction(action) {
@@ -18,10 +26,11 @@ export function validateAction(action) {
   if (result.postId && !/^[a-zA-Z0-9_-]{1,128}$/.test(result.postId)) throw new Error('Invalid post ID');
   if (result.content.length > (result.type === 'song' ? 1500 : 1200) || result.style.length > 1000) throw new Error('Action too long');
   if (!reads.has(result.type) && !result.content.trim()) throw new Error('Content required');
-  if (['qzone_post', 'nickname', 'signature'].includes(result.type) && containsSensitive(result.content)) throw new Error('Do not publish sensitive information');
+  if (['qzone_post', 'nickname', 'signature', 'group_message'].includes(result.type) && containsSensitive(result.content)) throw new Error('Do not publish sensitive information');
   if (result.type === 'nickname' && result.content.length > 32) throw new Error('Nickname too long');
   if (result.type === 'signature' && result.content.length > 120) throw new Error('Signature too long');
   if (result.type === 'qzone_detail' && !result.postId) throw new Error('Post ID required');
+  if (result.type === 'group_message' && !id(result.target)) throw new Error('Target group required');
   if (result.type === 'avatar') avatarUrl(result.content);
   return result;
 }
@@ -66,10 +75,17 @@ export function actionSummary(input) {
   if (action.type === 'signature') return `修改QQ签名为：${action.content}`;
   if (action.type === 'avatar') return `更换QQ头像，图片地址：\n${action.content}`;
   if (action.type === 'song') return `生成歌曲（独立音乐服务，歌声不保证与日常音色一致）：\n风格：${action.style || '温柔清新的短歌'}\n歌词：\n${action.content}`;
+  if (action.type === 'group_message') return `向QQ群 ${action.target} 发送以下文字：\n${action.content}`;
   throw new Error('Not a write action');
 }
 export async function writeSocial(config, input, options = {}) {
   const action = validateAction(input);
+  if (action.type === 'group_message') {
+    if (!config.crossChatEnabled || !config.allowedGroups.has(action.target)) throw new Error('Group not authorized');
+    const result = await onebot(config, 'send_group_msg', { group_id:Number(action.target), message:[{type:'text',data:{text:action.content}}] }, options);
+    if (!result?.message_id) throw new Error('Group send not confirmed');
+    return { text:`QQ已接受向群 ${action.target} 发送消息。`, messageId:result.message_id };
+  }
   if (action.type === 'qzone_post') {
     const result = await onebot(config, 'send_qzone_msg', { content: action.content, images: [], ugc_right: 4 }, options);
     if (!result?.tid) throw new Error('Publication has no result ID; do not retry automatically');
